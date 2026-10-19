@@ -1,0 +1,6 @@
+espn-api>=0.45
+numpy>=1.26
+pandas>=2.2
+python-dotenv>=1.0
+streamlit>=1.50
+pytest>=8.0

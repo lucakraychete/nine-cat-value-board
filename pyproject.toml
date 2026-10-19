@@ -1,0 +1,10 @@
+[project]
+name = "nine-cat-value-board"
+version = "0.1.0"
+description = "Fantasy basketball value board for ESPN head-to-head 9-category leagues"
+requires-python = ">=3.11"
+license = { text = "PolyForm-Noncommercial-1.0.0 (free for personal, noncommercial use)" }
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
