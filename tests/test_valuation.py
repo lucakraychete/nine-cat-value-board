@@ -8,6 +8,7 @@ from ninecat.valuation import (
     availability,
     category_zscores,
     percentage_impact,
+    replacement_level,
     team_profile,
     value_players,
 )
@@ -162,18 +163,28 @@ def test_punting_changes_rankings_toward_punt_profile():
     assert punt_ranks["big"] <= ranks["big"]
 
 
-def test_availability_is_clipped():
-    gp = pd.Series([0.0, 41.0, 82.0, 90.0])
-    assert availability(gp).tolist() == [0.0, 0.5, 1.0, 1.0]
+def test_availability_is_clipped_and_defaults_missing_games():
+    gp = pd.Series([41.0, 82.0, 90.0])
+    assert availability(gp).tolist() == [0.5, 1.0, 1.0]
+    assert availability(pd.Series([0.0, np.nan])).tolist() == [70 / 82, 70 / 82]
 
 
-def test_games_discount_only_shrinks_positive_values():
-    total = pd.Series([4.0, -2.0])
-    avail = pd.Series([0.5, 0.5])
-    assert apply_games_discount(total, avail).tolist() == [2.0, -2.0]
+def test_replacement_level_is_last_player_in_pool():
+    per_game = pd.Series([5.0, -1.0, 3.0, 0.5])
+    assert replacement_level(per_game, 3) == 0.5
+    assert replacement_level(per_game, 10) == -1.0  # pool larger than the list
 
 
-def test_games_missed_halves_value():
+def test_games_discount_scales_value_above_replacement():
+    per_game = pd.Series([4.0, 1.0, -2.0])
+    half = pd.Series([0.5, 0.5, 0.5])
+    # Replacement 1: a star keeps it plus half his edge; a player below
+    # replacement moves halfway up toward it.
+    assert apply_games_discount(per_game, half, 1.0).tolist() == [2.5, 1.0, -0.5]
+    assert apply_games_discount(per_game, half * 2, 1.0).tolist() == [4.0, 1.0, -2.0]
+
+
+def test_games_missed_halves_edge_over_replacement():
     df = pd.DataFrame(
         [make_player(f"filler{i}", PTS=8.0 + i) for i in range(10)]
         + [
@@ -182,8 +193,12 @@ def test_games_missed_halves_value():
         ]
     )
     out = value_players(df, EIGHT, pool_size=12).set_index("name")
+    repl = replacement_level(out["z_total"], 12)
     assert out.loc["hurt", "z_total"] == pytest.approx(out.loc["healthy", "z_total"])
-    assert out.loc["hurt", "value"] == pytest.approx(out.loc["healthy", "value"] / 2)
+    assert out.loc["healthy", "value"] == pytest.approx(out.loc["healthy", "z_total"])
+    assert out.loc["hurt", "value"] - repl == pytest.approx(
+        (out.loc["healthy", "value"] - repl) / 2
+    )
 
     no_discount = value_players(df, EIGHT, pool_size=12, games_discount=False)
     no_discount = no_discount.set_index("name")
@@ -192,18 +207,36 @@ def test_games_missed_halves_value():
     )
 
 
-def test_missing_gp_data_does_not_zero_everyone(random_league):
+def test_replacement_player_is_unchanged_by_missed_games():
+    df = pd.DataFrame([make_player(f"p{i}", PTS=10.0 + i, GP=41.0) for i in range(10)])
+    out = value_players(df, EIGHT, pool_size=5)
+    repl = replacement_level(out["z_total"], 5)
+    last_in_pool = out[out["z_total"] == repl].iloc[0]
+    assert last_in_pool["value"] == pytest.approx(repl)
+
+
+def test_missing_gp_is_treated_as_70_games(random_league):
     random_league["GP"] = 0.0
     out = value_players(random_league, NINE)
-    assert (out["availability"] == 1.0).all()
-    assert out["value"].max() > 0
+    assert out["availability"].eq(round(70 / 82, 3)).all()
+    repl = replacement_level(out["z_total"], 130)
+    expected = repl + (out["z_total"] - repl) * 70 / 82
+    pd.testing.assert_series_equal(out["value"], expected, check_names=False)
+
+
+def test_punts_move_replacement_level_but_not_the_pool(random_league):
+    full = value_players(random_league, NINE)
+    punted = value_players(random_league, NINE, punt=["AST", "PTS"])
+    assert set(full.loc[full["in_pool"], "name"]) == set(punted.loc[punted["in_pool"], "name"])
+    assert replacement_level(punted["z_total"], 130) != replacement_level(full["z_total"], 130)
 
 
 def test_pool_is_top_n_and_a_fixed_point(random_league):
     out = value_players(random_league, NINE, pool_size=130)
     assert out["in_pool"].sum() == 130
-    # The pool is exactly the 130 highest-valued players...
-    assert out["in_pool"].tolist() == [True] * 130 + [False] * (len(out) - 130)
+    # The pool is exactly the 130 best per-game values (before the discount)...
+    by_per_game = out.sort_values("z_total", ascending=False)
+    assert by_per_game["in_pool"].tolist() == [True] * 130 + [False] * (len(out) - 130)
     # ...and pool z-scores are centered, i.e. stats came from the pool.
     pool = out[out["in_pool"]]
     for cat in ["PTS", "REB", "AST"]:

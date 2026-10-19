@@ -1,6 +1,8 @@
 espn-api>=0.45
+nba_api>=1.11
 numpy>=1.26
 pandas>=2.2
+plotly>=6.0
 python-dotenv>=1.0
-streamlit>=1.50
+streamlit>=1.66
 pytest>=8.0

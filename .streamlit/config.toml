@@ -1,0 +1,43 @@
+# Look and feel from the original single-page board: Barlow Condensed headings,
+# IBM Plex Sans body, orange accent, light and dark palettes. Viewers can switch
+# between light and dark in the app's settings menu; it follows the system by default.
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+font = "IBM Plex Sans:https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+headingFont = "Barlow Condensed:https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&display=swap"
+baseFontSize = 14
+baseRadius = "7px"
+showWidgetBorder = true
+
+[theme.light]
+primaryColor = "#c2410c"
+backgroundColor = "#f4f6f8"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#17212c"
+linkColor = "#c2410c"
+borderColor = "#dde2e8"
+dataframeBorderColor = "#dde2e8"
+dataframeHeaderBackgroundColor = "#ffffff"
+greenColor = "#17824f"
+redColor = "#bf3a2b"
+blueColor = "#2f6fb0"
+orangeColor = "#c2410c"
+chartCategoricalColors = ["#c2410c", "#2f6fb0", "#17824f", "#5b6876", "#bf3a2b"]
+
+[theme.dark]
+primaryColor = "#f0874a"
+backgroundColor = "#0e1319"
+secondaryBackgroundColor = "#151c24"
+textColor = "#e5ebf1"
+linkColor = "#f0874a"
+borderColor = "#263241"
+dataframeBorderColor = "#263241"
+dataframeHeaderBackgroundColor = "#151c24"
+greenColor = "#3cbf82"
+redColor = "#e86b5c"
+blueColor = "#5b94cf"
+orangeColor = "#f0874a"
+chartCategoricalColors = ["#d96e32", "#5b94cf", "#3cbf82", "#8e9aa7", "#e86b5c"]

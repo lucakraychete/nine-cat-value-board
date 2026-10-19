@@ -20,16 +20,35 @@ and **8-cat** leagues without turnovers (`EXCLUDE_TO=true`, the default).
   shooter would produce on the same attempts.
 - **Punting.** Toggle categories you're giving up; they drop out of player
   values so the board reflects your build.
-- **Games-missed discount.** Value is scaled by projected games played, so
-  injury-prone stars aren't overrated.
+- **Games-missed discount.** What a player adds above replacement level (the
+  last player in the rostered pool, who'd start when he sits) is scaled by
+  projected games out of 82, so injury-prone stars aren't overrated.
 - **Iterative top-130 pool.** Averages are computed against the players who
   actually get rostered (10 teams x 13 spots by default), not the whole NBA.
   Because the pool depends on the values and vice versa, it iterates until
   the pool stops changing.
+- **Stats source.** Value players on ESPN's projection, last season's actual
+  stats, or a blend (60% projection, 40% last season for anyone who played
+  15+ games).
+- **Advanced stats.** USG%, TS%, AST%, TRB%, STL%, BLK%, TOV%, PER and BPM,
+  plus per-36-minute and per-100-possession value ranks: who produces when
+  he plays, regardless of role.
+- **Market check.** ESPN average draft position, market rank and the gap
+  between market rank and value rank.
+- **Player pages.** Select any player for his fantasy tier and NBA role,
+  category profile against his position, comparable players, minutes trend
+  and efficiency ranks.
 
-The app has three tabs: **Player board** (everyone, filterable),
-**My team** (your roster and category profile with league ranks), and
-**Waiver wire** (free agents, sortable by any category).
+The app has three tabs: **Players** (everyone, filterable, with a Categories
+or Advanced column set), **My team** (your roster and category profile with
+league ranks), and **Waiver wire** (free agents, sortable by any category).
+It follows your system's light or dark mode; switch in the app's settings menu.
+
+Data comes from ESPN (your league, projections, ADP), nba.com via
+[nba_api](https://github.com/swar/nba_api) (last season's stats, team pace,
+game logs) and one request to Basketball Reference for BPM. The advanced
+rates are computed from nba.com box scores with Basketball Reference's
+published formulas.
 
 ## Setup
 
@@ -114,10 +133,18 @@ Project layout:
 ```
 ninecat/
   config.py      settings from .env, category definitions
-  ingest.py      ESPN -> data/players.csv + data/meta.json
+  ingest.py      ESPN (+ nba.com via nbastats.py) -> data/ cache
+  nbastats.py    nba.com and Basketball Reference fetches
+  rates.py       advanced rate stats from box-score totals
+  lines.py       stats sources (projection, last season, blend), per-36, per-100
   valuation.py   z-scores, percentage impact, punts, games discount, iterative pool
-app.py           Streamlit UI
-tests/           pytest suite for valuation.py
+  board.py       the board: value plus per-36/per-100, market gap, tiers
+  player.py      player-page numbers
+  charts.py      plotly charts
+  theme.py       colors, fonts, CSS
+app.py           Streamlit entry point
+ui/              Streamlit rendering (tables, player page)
+tests/           pytest suite, synthetic data, no network
 ```
 
 ## Disclaimer
