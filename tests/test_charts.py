@@ -37,7 +37,19 @@ def test_figures_build():
         charts.value_strip([-1.0, 0.5, 2.0], ["a", "b", "c"], [3, 2, 1], 2, T),
         charts.percentile_bars([item, item], T, "C"),
     ]
+    figs += [
+        charts.category_delta(["PTS", "REB"], [1.2, -0.4], T, league=[0.5, 0.1]),
+        charts.win_bars(["A", "B"], [0.7, 0.4], [5.1, 3.2], T),
+        charts.win_change(["A", "B"], [0.5, 0.4], [0.6, 0.35], T),
+        charts.category_strength(["PTS", "REB"], [0.8, 0.3], [1, 7], 20, ["REB"], T),
+        charts.worth_bars(["A", "B"], [2.0, -1.0], "A", "B", T),
+    ]
     assert all(isinstance(f, go.Figure) for f in figs)
+    # gains green, losses red; a punted category is faded
+    assert list(figs[6].data[0].marker.color) == [T["bad"], T["good"]]
+    assert figs[9].data[0].marker.color[0].endswith("0.35)")
+    # win bars run worst to best, bottom to top
+    assert list(figs[7].data[0].y) == ["B", "A"]
     # projection segment is dashed, the real season solid
     assert figs[1].data[0].line.dash == "dash"
     # percentile bars: only the overall dots exist when position percentiles are missing

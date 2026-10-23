@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from html import escape
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
 from ninecat import charts
 from ninecat.board import player_key
+from ninecat.league import League, drop_options, fit_note, uncertainty
+from ninecat.matchup import WEEKS, change, outlook
 from ninecat.lines import SOURCES, name_key
 from ninecat.player import (
     category_profile,
@@ -27,11 +30,14 @@ from ui.components import (
     card,
     card_title,
     category_table,
+    delta_css,
+    delta_frame,
     fmt_num,
     fmt_pct,
     h4,
     html,
     legend,
+    show_plain,
     show_table,
     tags,
 )
@@ -43,9 +49,155 @@ def _chart(fig, key: str) -> None:
     st.plotly_chart(fig, theme=None, config=PLOTLY_CONFIG, key=key)
 
 
+def pos_neg(x: float, threshold: float = 0.005) -> str:
+    return "pos" if x > threshold else "neg" if x < -threshold else ""
+
+
+def _uncertainty_tile(lg: League, idx: int, r: pd.Series) -> str:
+    u = uncertainty(lg.impact[idx], r.get("L_G"), r.get("injury_status"))
+    return (f'<div title="{escape(u.why)}"><b>{u.low:+.1f} to {u.high:+.1f}</b>'
+            f'<span>impact range · {u.label}</span></div>')
+
+
+def _impact_section(board: pd.DataFrame, lg: League, i: int, ctx: dict, open_player) -> None:
+    t, cats, me = ctx["tokens"], ctx["cats"], ctx["my_team"]
+    imp = lg.impact[i]
+    league_tile = (f'<div><b class="{pos_neg(imp)}">{imp:+.1f}</b><span>for the average team in your league · '
+                   f'#{lg.impact_rank[i]} of {len(board)}</span></div>')
+    if not me or me not in lg.base:
+        with card("impact"):
+            card_title("Impact", "League impact: how many more categories the average team in your league would win "
+                       "over the season by adding him, dropping its lowest-value player at his position. Pick your "
+                       "team at the top for your own numbers.")
+            html(f'<div class="hero">{league_tile}</div>')
+            h4("Where it comes from (average team)")
+            _chart(charts.category_delta(cats, lg.impact_by_cat[i], t), "pp_imp_avg")
+        return
+
+    own = lg.owner[i] == me
+    fa = lg.owner[i] == FREE_AGENT
+    with card("impact"):
+        card_title(f"Impact on {me}")
+        if own:
+            incoming, outgoing = lg.best_fa_at(i), i
+            if incoming is None:
+                html('<p class="note">No free agents to compare him with.</p>')
+                return
+            framing = (f"What he's worth to you: your team with him compared with replacing him by the best free "
+                       f"agent at his position ({escape(lg.names[incoming])}, {escape(board['eligible'].iloc[incoming])})")
+        else:
+            mine = list(lg.rosters[me])
+            dopts = drop_options(lg, me, i) if fa else None
+            options = [o.drop for o in dopts] if fa else sorted(mine, key=lambda x: lg.stats.value[x])
+            default = dopts[0].drop if fa else lg.drop_for(mine, i)
+            season = {o.drop: o.change.cats for o in dopts} if fa else {}
+            verb = "Add him, drop" if fa else f"Trade for him (from {r_owner(lg, i)}), give up"
+            outgoing = st.selectbox(verb, options, index=options.index(default) if default in options else 0,
+                                    format_func=lambda x: lg.names[x] + (f" ({season[x]:+.1f} season)" if x in season else ""),
+                                    key=f"pp_out_{i}_{me}")
+            incoming = i
+            best = (" (the best drop)" if fa and outgoing == default else
+                    " (your lowest-value player at his position)" if not fa and outgoing == default else "")
+            framing = ((f"Adding {escape(lg.names[i])} and dropping {escape(lg.names[outgoing])}" if fa else
+                        f"Trading {escape(lg.names[outgoing])} for {escape(lg.names[i])}") + best)
+        html(f'<p class="note">{framing}. Each category is simulated against every other team\'s current roster for '
+             f'{WEEKS} head-to-head weeks, so "expected wins" is out of {WEEKS} in each category.</p>')
+
+        weeks = lg.swap_weeks(me, incoming, outgoing)
+        base, swapped = lg.base[me], outlook(me, weeks, lg.stats)
+        rk0, rk1 = lg.cat_rank.loc[me], lg.ranks(weeks).loc[me]
+        before, after = (swapped, base) if own else (base, swapped)
+        r_before, r_after = (rk1, rk0) if own else (rk0, rk1)
+        ch = change(before, after)
+        html(f"""<div class="hero">
+            <div><b class="{pos_neg(ch.cats)}">{ch.cats:+.1f}</b><span>category wins over the season for you</span></div>
+            <div><b class="{pos_neg(ch.win)}">{ch.win * 100:+.1f} pts</b><span>weekly matchup win chance</span></div>
+            {league_tile}</div>""")
+
+        left, right = st.columns(2)
+        with left:
+            h4("Expected category wins over the season")
+            rows = "".join(
+                f'<tr><td class="l"><b>{c}</b></td><td>{before.by_cat[k] * WEEKS:.1f}</td>'
+                f'<td>{after.by_cat[k] * WEEKS:.1f}</td><td class="{pos_neg(ch.by_cat[k])}">{ch.by_cat[k]:+.2f}</td>'
+                f'<td>{r_before[c]} → <b>{r_after[c]}</b></td>'
+                f'<td class="{pos_neg(lg.impact_by_cat[i, k])}">{lg.impact_by_cat[i, k]:+.2f}</td></tr>'
+                for k, c in enumerate(cats))
+            tot_b, tot_a = before.by_cat.sum() * WEEKS, after.by_cat.sum() * WEEKS
+            rows += (f'<tr><td class="l"><b>Total</b></td><td><b>{tot_b:.1f}</b></td><td><b>{tot_a:.1f}</b></td>'
+                     f'<td class="{pos_neg(tot_a - tot_b)}"><b>{tot_a - tot_b:+.2f}</b></td><td></td>'
+                     f'<td class="{pos_neg(imp)}"><b>{imp:+.2f}</b></td></tr>')
+            html(f'<div class="ltable"><table><thead><tr><th class="l">Cat</th><th>{"Without" if own else "Now"}</th>'
+                 f'<th>{"With him" if own else "After"}</th><th>Change</th>'
+                 '<th title="Your rank in the league in this category (1 = best)">League rank</th>'
+                 f'<th title="Change for the average team in your league">Avg team</th></tr></thead><tbody>{rows}'
+                 '</tbody></table></div>')
+        with right:
+            h4("Change in category wins")
+            legend([(t["good"], "For you (bar)"), (t["s2"], "Average team (dot)")])
+            _chart(charts.category_delta(cats, ch.by_cat, t, league=lg.impact_by_cat[i]), "pp_imp_delta")
+        h4("Matchup win chance by opponent")
+        labels = ("Without him", "With him") if own else ("Now", "After the move")
+        legend([(t["s2"], labels[0]), (t["s1"], labels[1])])
+        _chart(charts.win_change(before.opponents, before.win, after.win, t, labels), "pp_imp_opp")
+
+        if fa:
+            h4("Who to drop to make room")
+            out_p = next((x for x in lg.rosters[me] if lg.injury[x] == "OUT"), None)
+            html('<p class="note">Every player on your roster, ranked by how many category wins you\'d have over the '
+                 'season after the swap. The top name is the best drop.'
+                 + (f" {escape(lg.names[out_p])} is listed OUT: if you have an open injured-list spot, move him there "
+                    "and add without dropping anyone." if out_p is not None else "") + "</p>")
+            top = dopts[:5]
+            deltas = delta_frame(cats, [o.change.by_cat for o in top])
+            fits = [fit_note(lg, o.change.by_cat, me) for o in top]
+            frame = pd.concat([pd.DataFrame({
+                "Drop": [lg.names[o.drop] + (" (best drop)" if k == 0 else "") for k, o in enumerate(top)],
+                "Season +": [o.change.cats for o in top]}), deltas], axis=1)
+            frame["Fit"] = [f.text for f in fits]
+            frame["Fit detail"] = [f.gains + (f" · costs {f.losses}" if f.losses else "") for f in fits]
+            css = pd.DataFrame("", index=frame.index, columns=frame.columns)
+            css[cats] = delta_css(deltas, ctx["mode"])
+            show_plain(frame.style.apply(lambda _: css, axis=None).format(
+                {"Season +": "{:+.1f}", **{c: "{:+.1f}" for c in cats}}),
+                {"Drop": st.column_config.TextColumn(width="medium"),
+                 **{c: st.column_config.NumberColumn(width=52) for c in cats}})
+
+
+def r_owner(lg: League, i: int) -> str:
+    return escape(str(lg.owner[i]))
+
+
+def _fit_table(lg: League, i: int, ctx: dict) -> None:
+    cats = ctx["cats"]
+    order = sorted(range(len(lg.teams)), key=lambda j: -lg.worth[i, j])
+    deltas = delta_frame(cats, [lg.worth_by_cat[i, j] for j in order])
+    fits = [fit_note(lg, lg.worth_by_cat[i, j], lg.teams[j]) for j in order]
+    own = lg.owner[i]
+    frame = pd.concat([pd.DataFrame({
+        "Team": [lg.teams[j] for j in order],
+        "Note": ["owner: vs best FA at his position" if lg.teams[j] == own else
+                 "your team" if lg.teams[j] == ctx["my_team"] else "" for j in order],
+        "Total": [lg.worth[i, j] for j in order]}), deltas], axis=1)
+    frame["Fit"] = [("✓ " if f.good else "") + f.text for f in fits]
+    frame["Fit detail"] = [f.gains + (f" · costs {f.losses}" if f.losses else "") for f in fits]
+    css = pd.DataFrame("", index=frame.index, columns=frame.columns)
+    css[cats] = delta_css(deltas, ctx["mode"])
+    tk = ctx["tokens"]
+    css["Total"] = np.where(frame["Total"] > 0.005, f"color: {tk['good']}; font-weight: 600",
+                            np.where(frame["Total"] < -0.005, f"color: {tk['bad']}; font-weight: 600", ""))
+    css["Fit"] = [f"color: {tk['good']}; font-weight: 600" if f.good else "" for f in fits]
+    show_plain(frame.style.apply(lambda _: css, axis=None).format({"Total": "{:+.1f}", **{c: "{:+.1f}" for c in cats}}),
+               {"Team": st.column_config.TextColumn(width="medium", pinned=True),
+                "Note": st.column_config.TextColumn(width="medium"),
+                "Fit": st.column_config.TextColumn(width="medium"),
+                "Fit detail": st.column_config.TextColumn(width="large"),
+                **{c: st.column_config.NumberColumn(width=52) for c in cats}})
+
+
 def render(board: pd.DataFrame, players: pd.DataFrame, pid, ctx: dict, open_player) -> None:
-    """ctx: cats, punt, source, my_team, abbrevs, team_names, seasons, pace, logs, mode, tokens."""
-    t, cats = ctx["tokens"], ctx["cats"]
+    """ctx: cats, punt, source, my_team, abbrevs, seasons, pace, logs, mode, tokens, league."""
+    t, cats, lg = ctx["tokens"], ctx["cats"], ctx["league"]
     keys = player_key(board).astype(str)
     match = board.index[keys == str(pid)]
     raw = players[player_key(players).astype(str) == str(pid)]
@@ -80,7 +232,7 @@ def render(board: pd.DataFrame, players: pd.DataFrame, pid, ctx: dict, open_play
             <div><b>{pos} #{pos_rank}</b><span>of {len(group)} {pos}s</span></div>
             <div><b>{'#' + str(int(r['p36_rank'])) if pd.notna(r['p36_rank']) else '–'}</b><span>Per-36 rank</span></div>
             <div><b>{'#' + str(int(r['p100_rank'])) if pd.notna(r['p100_rank']) else '–'}</b><span>Per-100-poss rank</span></div>
-            <div><b>{fmt_num(adp)}</b><span>ADP {gap_txt}</span></div></div>""")
+            <div><b>{fmt_num(adp)}</b><span>ADP {gap_txt}</span></div>{_uncertainty_tile(lg, idx, r)}</div>""")
 
     # ---- tier ladder
     with card("tier"):
@@ -88,15 +240,43 @@ def render(board: pd.DataFrame, players: pd.DataFrame, pid, ctx: dict, open_play
                            f"({ctx['n_teams']} teams). NBA role from projected minutes and usage.")
         _chart(charts.tier_ladder(int(r["rank"]), t), "pp_ladder")
 
+    # ---- league model: impact, worth to each team, replacement, fit
+    _impact_section(board, lg, idx, ctx, open_player)
+    left, right = st.columns(2)
+    with left, card("worth"):
+        card_title("Worth to each team", "Category wins over the season each team would gain by getting him, "
+                   "dropping its lowest-value player at his position. For his current owner (blue), it's what he's "
+                   "worth compared with the best free agent at his position.")
+        owner_name = r["fantasy_team"] if r["fantasy_team"] in lg.teams else None
+        _chart(charts.worth_bars(lg.teams, lg.worth[idx], owner_name, ctx["my_team"], t), "pp_worth")
+    with right, card("replacement"):
+        repl = lg.repl[idx]
+        repl_txt = f" ({escape(lg.names[repl])})" if repl >= 0 else ""
+        pir = lg.pos_impact_rank.get(pos, np.full(len(board), np.nan))[idx]
+        card_title("Above position replacement", f"League impact minus the impact of the best free agent at his "
+                   f"position{repl_txt}: what he adds that you can't get off the wire. {pos} impact rank: "
+                   f"#{'–' if np.isnan(pir) else int(pir)} of {len(group)}.")
+        vr = lg.vs_repl[idx]
+        html(f'<div class="hero"><div><b class="{pos_neg(vr)}">{vr:+.1f}</b>'
+             '<span>category wins over the season vs replacement</span></div></div>')
+        _chart(charts.category_delta(cats, lg.vs_repl_by_cat[idx], t), "pp_repl")
+    with card("fit"):
+        card_title("Category change and team fit", "Change in expected category wins over the season for each team "
+                   "that got him. Fit compares the gains with where that team stands: a swing category (won 30–70% "
+                   "of weeks) is where extra production flips matchups; adding to a category a team already wins, "
+                   "or still loses, moves less.")
+        _fit_table(lg, idx, ctx)
+
     # ---- category profile and position
     prof = category_profile(board, idx, cats)
     left, right = st.columns(2)
     with left, card("profile"):
         best = prof.sort_values("pct", ascending=False)
         card_title("Category profile",
-                   f"Percentile in each category among the top 150 players. Best: "
-                   + ", ".join(f"{c} ({p:.0f})" for c, p in zip(best["cat"][:3], best["pct"][:3]))
-                   + ". Weakest: " + ", ".join(f"{c} ({p:.0f})" for c, p in zip(best["cat"][-2:], best["pct"][-2:])) + ".")
+                   "Percentile in each category among the top 150 players. Best: "
+                   + ", ".join(f"{c} ({p:.0f})" for c, p in zip(best["cat"].iloc[:3], best["pct"].iloc[:3]))
+                   + ". Weakest: " + ", ".join(f"{c} ({p:.0f})" for c, p in
+                                               zip(best["cat"].iloc[-2:], best["pct"].iloc[-2:])) + ".")
         legend([(t["s1"], r["name"]), (t["s2"], f"Average {pos} in the top 150")])
         _chart(charts.radar(list(prof["cat"]), list(prof["pct"]), list(prof["pos_avg_pct"]), t,
                             (r["name"], f"Average {pos}")), "pp_radar")

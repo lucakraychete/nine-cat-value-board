@@ -110,6 +110,23 @@ h1 {{ font-size: 34px !important; font-weight: 700 !important; line-height: 1 !i
 .callout {{ border-left: 3px solid var(--accent); padding: 4px 0 4px 12px; display: grid; gap: 4px; }}
 .callout b {{ font-family: var(--display); font-size: 18px; font-weight: 600; }}
 .status {{ display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 13px; color: var(--muted); }}
+.hero {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 6px 0; }}
+.hero div {{ background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+  display: grid; gap: 2px; min-width: 0; }}
+.hero b {{ font-family: var(--display); font-size: clamp(24px, 6.5vw, 32px); font-weight: 700; line-height: 1;
+  font-variant-numeric: tabular-nums; color: var(--ink); }}
+.hero b.pos {{ color: var(--good); }} .hero b.neg {{ color: var(--bad); }}
+.hero span {{ font-size: 12px; color: var(--muted); }}
+.catchip {{ font-size: 12px; padding: 4px 9px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--bg); font-variant-numeric: tabular-nums; color: var(--ink); }}
+.sw {{ display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }}
+.ltable {{ overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }}
+.ltable table {{ border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 13px; color: var(--ink); }}
+.ltable th, .ltable td {{ padding: 6px 8px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); }}
+.ltable th {{ font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }}
+.ltable th.l, .ltable td.l {{ text-align: left; }}
+.ltable td small {{ display: block; color: var(--muted); font-size: 11px; }}
+.ltable tr.mine td {{ box-shadow: inset 0 0 0 999px {rgba(t['accent'], 0.08)}; }}
 .card-title {{ font-family: var(--display); font-weight: 700; font-size: 22px; margin: 0; letter-spacing: .01em; color: var(--ink); }}
 .card-h4 {{ font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 6px 0 4px; }}
 """

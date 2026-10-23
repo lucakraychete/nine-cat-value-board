@@ -39,9 +39,20 @@ and **8-cat** leagues without turnovers (`EXCLUDE_TO=true`, the default).
   category profile against his position, comparable players, minutes trend
   and efficiency ranks.
 
-The app has three tabs: **Players** (everyone, filterable, with a Categories
-or Advanced column set), **My team** (your roster and category profile with
-league ranks), and **Waiver wire** (free agents, sortable by any category).
+- **Head-to-head matchup model.** Each team's week is simulated category by
+  category, with weekly variance and correlated categories (rebounds, blocks
+  and FG% tend to move together, as do points, threes and FT%), to get a
+  chance of winning each category and each weekly matchup.
+- **League impact.** Every player's worth to every team in extra category
+  wins over a 20-week season, his impact for the average team, and his
+  impact over the best free agent at his position.
+
+The app has four tabs: **Players** (everyone, filterable, with a Categories
+or Advanced column set and league impact), **My team** (projected standing,
+category outlook, matchup odds against every team, what each player is
+worth to you, best pickups), **Waiver wire** (every free agent tried
+against every possible drop) and **Team categories** (each team's
+per-game category totals and league ranks, plus projected standings).
 It follows your system's light or dark mode; switch in the app's settings menu.
 
 Data comes from ESPN (your league, projections, ADP), nba.com via
@@ -139,6 +150,8 @@ ninecat/
   lines.py       stats sources (projection, last season, blend), per-36, per-100
   valuation.py   z-scores, percentage impact, punts, games discount, iterative pool
   board.py       the board: value plus per-36/per-100, market gap, tiers
+  matchup.py     head-to-head matchup model
+  league.py      team totals, league impact, waivers
   player.py      player-page numbers
   charts.py      plotly charts
   theme.py       colors, fonts, CSS

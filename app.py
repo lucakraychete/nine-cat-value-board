@@ -13,18 +13,16 @@ from html import escape
 import pandas as pd
 import streamlit as st
 
-from ninecat.board import ADVANCED_METRICS, FANTASY_TIERS, build_board, player_key
+from ninecat.board import ADVANCED_METRICS, build_board, player_key
 from ninecat.config import DEFAULT_POOL_SIZE, SEASON_GAMES, categories, load_settings
 from ninecat.ingest import FREE_AGENT, ingest, load_cached, load_game_logs
 from ninecat.lines import SOURCES
 from ninecat.nbastats import NOT_YET, season_label
 from ninecat.theme import app_css, tokens
-from ninecat.valuation import team_profile
-from ui import player_page
+from ninecat.league import build_league
+from ui import league_views, player_page
 from ui.components import (
     advanced_table,
-    card,
-    card_title,
     category_table,
     html,
     show_table,
@@ -53,6 +51,12 @@ def cached_logs():
 def cached_board(players, cats, punt, source, games_discount, pool_size, season_games, pace):
     return build_board(players, cats, punt=punt, source=source, games_discount=games_discount,
                        pool_size=pool_size, season_games=season_games, pace=dict(pace))
+
+
+@st.cache_data(show_spinner="Simulating every player on every team...")
+def cached_league(_board, key, cats, teams, season_games):
+    """The league model for one board; `key` stands in for hashing the board."""
+    return build_league(_board, cats, teams, season_games=season_games)
 
 
 def refresh() -> None:
@@ -162,11 +166,15 @@ with st.container(border=True, key="card_controls"):
         games_discount = st.toggle("Discount for games missed", value=True)
     punt = st.pills("Punt categories", cats, selection_mode="multi", key=f"punt_{len(cats)}") or []
 
-board = cached_board(players, tuple(cats), tuple(punt), source, games_discount, int(pool_size),
-                     int(season_games), tuple(sorted(meta.get("pace", {}).items())))
+board_args = (tuple(cats), tuple(punt), source, games_discount, int(pool_size), int(season_games),
+              tuple(sorted(meta.get("pace", {}).items())))
+board = cached_board(players, *board_args)
+league_key = (meta.get("fetched_at"), board_args)
+league = cached_league(board, league_key, tuple(cats), tuple(team_names), int(season_games))
+board = board.assign(impact=league.impact, impact_rank=league.impact_rank)
 ctx = {"cats": cats, "punt": punt, "source": source, "my_team": my_team, "abbrevs": abbrevs,
        "seasons": seasons, "pace": meta.get("pace", {}), "mode": MODE, "tokens": TOKENS,
-       "n_teams": len(teams), "epoch": st.session_state.epoch}
+       "n_teams": len(teams), "epoch": st.session_state.epoch, "league": league, "league_key": league_key}
 
 # ---------------------------------------------------------------- player page
 pid = st.query_params.get("player")
@@ -180,7 +188,7 @@ if pid:
     st.stop()
 
 # ---------------------------------------------------------------- tabs
-tab_players, tab_team, tab_fa = st.tabs(["Players", "My team", "Waiver wire"])
+tab_players, tab_team, tab_fa, tab_cats = st.tabs(["Players", "My team", "Waiver wire", "Team categories"])
 
 with tab_players:
     f1, f2, f3, f4 = st.columns([1.6, 1.2, 0.9, 1.1], vertical_alignment="bottom")
@@ -223,45 +231,13 @@ with tab_players:
              'him. Click a column header to sort; select a row for the player page.</p>')
 
 with tab_team:
-    if not my_team:
-        st.info("Pick your team at the top to see your roster and category profile.")
-    else:
-        roster = board[board["fantasy_team"] == my_team]
-        counts = roster["fantasy_tier"].value_counts()
-        chips = "".join(f'<span class="tier t-{n.lower()}">{counts[n]} {n}</span>'
-                        for _, n in FANTASY_TIERS if n in counts)
-        html(f'<div class="pphead"><div class="eyebrow">My team</div><h2 style="font-size:32px">'
-             f'{escape(my_team)}</h2><div class="chips">{chips}</div></div>')
-        scored = [c for c in cats if c not in punt]
-        profile = team_profile(board[board["fantasy_team"] != FREE_AGENT], scored)
-        if my_team in profile.index:
-            with card("team_profile"):
-                card_title("Category profile", "Sum of per-game z-scores across the roster, and league rank "
-                                               f"out of {len(profile)} teams (1 = best).")
-                ranks = profile.rank(ascending=False, method="min").astype(int)
-                html('<div class="catranks">' + "".join(
-                    f'<div><span>{c}</span><b>#{ranks.loc[my_team, c]}</b>'
-                    f'<span class="{"pos" if profile.loc[my_team, c] >= 0 else "neg"}">'
-                    f'{profile.loc[my_team, c]:+.2f}</span></div>' for c in scored) + "</div>")
-        with card("roster"):
-            card_title("Roster", "Select a player for his page.")
-            styler, config = category_table(roster, cats, punt, None, abbrevs, MODE)
-            pick_player(roster, show_table(styler, config, key=f"tbl_roster_{ctx['epoch']}", height="auto"))
+    league_views.render_my_team(board, league, ctx, pick_player)
 
 with tab_fa:
-    fas = board[board["fantasy_team"] == FREE_AGENT]
-    scored = [c for c in cats if c not in punt]
-    if my_team:
-        profile = team_profile(board[board["fantasy_team"] != FREE_AGENT], scored)
-        if my_team in profile.index:
-            weakest = profile.loc[my_team, scored].nsmallest(3)
-            html(f'<div class="callout"><span class="eyebrow">Waiver wire for {escape(my_team)}</span>'
-                 f'<b>Your weakest categories: {", ".join(weakest.index)}</b>'
-                 '<span class="note">Click those column headers to sort free agents by them.</span></div>')
-    if st.toggle("Hide injured (OUT)", value=True):
-        fas = fas[fas["injury_status"].fillna("ACTIVE") != "OUT"]
-    styler, config = category_table(fas, cats, punt, None, abbrevs, MODE)
-    pick_player(fas, show_table(styler, config, key=f"tbl_fa_{ctx['epoch']}", height=640))
+    league_views.render_waivers(board, league, ctx, pick_player)
+
+with tab_cats:
+    league_views.render_team_categories(board, league, ctx)
 
 # ---------------------------------------------------------------- footer
 adv_names = ", ".join(m.label for m in ADVANCED_METRICS)

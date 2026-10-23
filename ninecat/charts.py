@@ -192,6 +192,119 @@ def value_strip(values: Sequence[float], names: Sequence[str], ranks: Sequence[i
     return fig
 
 
+def _row_height(n: int, per_row: int = 30, extra: int = 40) -> int:
+    return per_row * n + extra
+
+
+def _label_margin(labels: Sequence[str], px_per_char: float = 7.0) -> int:
+    """Left margin wide enough for the longest y-axis label at 12px."""
+    return int(min(240, 16 + px_per_char * max((len(str(x)) for x in labels), default=4)))
+
+
+def category_delta(cats: Sequence[str], values: Sequence[float], t: dict,
+                   league: Sequence[float] | None = None) -> go.Figure:
+    """Change in season category wins: bars (green gain, red loss), and the
+    league-average team's change as dots when given."""
+    y = list(cats)[::-1]
+    vals = list(values)[::-1]
+    fig = go.Figure(go.Bar(
+        x=vals, y=y, orientation="h", marker_color=[t["good"] if v >= 0 else t["bad"] for v in vals],
+        text=[f"{v:+.2f}" for v in vals], textposition="outside", cliponaxis=False,
+        textfont=dict(size=11, color=t["ink"]), hovertemplate="%{y}: %{x:+.2f} wins<extra></extra>"))
+    if league is not None:
+        fig.add_trace(go.Scatter(
+            x=list(league)[::-1], y=y, mode="markers",
+            marker=dict(size=9, color=t["s2"], line=dict(color=t["surface"], width=2)),
+            hovertemplate="%{y}: league-average team %{x:+.2f}<extra></extra>"))
+    span = max([0.5, *map(abs, values), *(map(abs, league) if league is not None else [])]) * 1.25
+    _layout(fig, t, _row_height(len(y)), margin=dict(l=44, r=40, t=8, b=24))
+    fig.update_xaxes(range=[-span, span], zeroline=True, zerolinecolor=t["muted"], showgrid=False,
+                     tickfont=dict(size=10, color=t["muted"]), fixedrange=True)
+    fig.update_yaxes(tickfont=dict(size=12, color=t["ink"]), fixedrange=True)
+    fig.update_layout(bargap=0.35)
+    return fig
+
+
+def _pct_axis(fig: go.Figure, t: dict) -> None:
+    fig.update_xaxes(range=[0, 1], tickvals=[0, 0.25, 0.5, 0.75, 1], ticktext=["0%", "25%", "50%", "75%", "100%"],
+                     gridcolor=t["line"], griddash="dot", tickfont=dict(size=10, color=t["muted"]), fixedrange=True,
+                     zeroline=False)
+    fig.add_vline(x=0.5, line=dict(color=t["muted"], width=1))
+    fig.update_yaxes(tickfont=dict(size=12, color=t["ink"]), gridcolor=t["line"], fixedrange=True)
+
+
+def win_bars(teams: Sequence[str], win: Sequence[float], cats_won: Sequence[float], t: dict) -> go.Figure:
+    """Chance to win the weekly matchup against each team, best first."""
+    order = sorted(range(len(teams)), key=lambda i: win[i])
+    fig = go.Figure(go.Bar(
+        x=[win[i] for i in order], y=[teams[i] for i in order], orientation="h", marker_color=t["s1"],
+        text=[f"{win[i]:.0%}" for i in order], textposition="outside", cliponaxis=False,
+        textfont=dict(size=11, color=t["ink"]), customdata=[cats_won[i] for i in order],
+        hovertemplate="%{y}: %{x:.0%} to win, %{customdata:.1f} expected categories<extra></extra>"))
+    _layout(fig, t, _row_height(len(teams)), margin=dict(l=_label_margin(teams), r=44, t=8, b=24))
+    _pct_axis(fig, t)
+    fig.update_layout(bargap=0.35)
+    return fig
+
+
+def win_change(teams: Sequence[str], before: Sequence[float], after: Sequence[float], t: dict,
+               labels: tuple[str, str] = ("Now", "After")) -> go.Figure:
+    """Matchup win chance by opponent, before (blue) and after (orange) a move."""
+    y = list(teams)[::-1]
+    b, a = list(before)[::-1], list(after)[::-1]
+    fig = go.Figure()
+    for i in range(len(y)):
+        fig.add_shape(type="line", x0=b[i], x1=a[i], y0=i, y1=i, line=dict(color=t["muted"], width=2))
+    fig.add_trace(go.Scatter(x=b, y=y, mode="markers", marker=dict(size=10, color=t["s2"], line=dict(color=t["surface"], width=2)),
+                             hovertemplate="%{y} " + labels[0].lower() + ": %{x:.0%}<extra></extra>"))
+    fig.add_trace(go.Scatter(x=a, y=y, mode="markers+text", text=[f"{v:.0%}" for v in a], textposition="middle right",
+                             textfont=dict(size=11, color=t["ink"]),
+                             marker=dict(size=12, color=t["s1"], line=dict(color=t["surface"], width=2)),
+                             hovertemplate="%{y} " + labels[1].lower() + ": %{x:.0%}<extra></extra>"))
+    _layout(fig, t, _row_height(len(y)), margin=dict(l=_label_margin(y), r=44, t=8, b=24))
+    _pct_axis(fig, t)
+    return fig
+
+
+def category_strength(cats: Sequence[str], by_cat: Sequence[float], ranks: Sequence[int], weeks: int,
+                      punt: Sequence[str], t: dict) -> go.Figure:
+    """Share of weeks each category is won, with wins out of `weeks` and league rank."""
+    y = list(cats)[::-1]
+    p = list(by_cat)[::-1]
+    rk = list(ranks)[::-1]
+    colors = [rgba(t["good"] if v >= 0.5 else t["bad"], 0.35 if c in punt else 1.0) for c, v in zip(y, p)]
+    fig = go.Figure(go.Bar(
+        x=p, y=y, orientation="h", marker_color=colors, cliponaxis=False, textposition="outside",
+        text=[f"{v * weeks:.1f} of {weeks} · #{r}{' · punt' if c in punt else ''}" for c, v, r in zip(y, p, rk)],
+        textfont=dict(size=11, color=t["ink"]),
+        hovertemplate="%{y}: wins %{x:.0%} of weeks<extra></extra>"))
+    _layout(fig, t, _row_height(len(y)), margin=dict(l=48, r=120, t=8, b=24))
+    _pct_axis(fig, t)
+    fig.update_layout(bargap=0.35)
+    return fig
+
+
+def worth_bars(teams: Sequence[str], worth: Sequence[float], owner: str | None, mine: str | None,
+               t: dict) -> go.Figure:
+    """Season category wins he'd add for each team; his owner (blue) vs best free agent."""
+    order = sorted(range(len(teams)), key=lambda i: worth[i])
+    labels = [teams[i] + (" (owner)" if teams[i] == owner else "") for i in order]
+    colors = [t["s2"] if teams[i] == owner else t["good"] if worth[i] >= 0 else t["bad"] for i in order]
+    fig = go.Figure(go.Bar(
+        x=[worth[i] for i in order], y=labels, orientation="h", marker_color=colors, cliponaxis=False,
+        text=[f"{worth[i]:+.1f}" for i in order], textposition="outside", textfont=dict(size=11, color=t["ink"]),
+        hovertemplate="%{y}: %{x:+.1f} category wins over the season<extra></extra>"))
+    span = max([1.0, *map(abs, worth)]) * 1.25
+    _layout(fig, t, _row_height(len(teams)), margin=dict(l=_label_margin(labels), r=40, t=8, b=24))
+    fig.update_xaxes(range=[-span, span], zeroline=True, zerolinecolor=t["muted"], showgrid=False,
+                     tickfont=dict(size=10, color=t["muted"]), fixedrange=True)
+    fig.update_yaxes(fixedrange=True, tickfont=dict(size=12, color=t["ink"]),
+                     ticktext=[f"<b>{lab}</b>" if teams[i] == mine else lab for lab, i in zip(labels, order)],
+                     tickvals=labels)
+    fig.update_layout(bargap=0.35)
+    return fig
+
+
 def percentile_bars(items, t: dict, pos: str) -> go.Figure:
     """One row per metric: a 0-100 track, his percentile overall (orange) and at his position (blue)."""
     n = len(items)

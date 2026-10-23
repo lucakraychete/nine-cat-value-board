@@ -10,8 +10,10 @@ noncommercial use).
 
 Current work: porting the original single-page JS board (`reference/original_app.html`,
 gitignored, local only) into this app, reusing its formulas. Phase A (look, stats
-sources, advanced stats, ADP, player pages) is in; Phase B (team category totals,
-H2H matchup model, league impact) is next.
+sources, advanced stats, ADP, player pages) and Phase B (team category totals, H2H
+matchup model, league impact, rest-of-season waivers) are in. Not ported yet: trades
+and trade finder, perceived value, weekly streams (need the NBA weekly schedule),
+fantasy-playoff games, breakouts tab, league activity.
 
 ## Structure
 
@@ -28,11 +30,16 @@ ninecat/valuation.py   value_players(), category_zscores(), percentage_impact(),
                        games discount, iterative pool, team_profile()
 ninecat/board.py       build_board(): value on a line + per-36/per-100 values, ADP market
                        rank and gap, advanced z-scores, fantasy and role tiers
+ninecat/matchup.py     H2H model: team-week means/variances, category odds, correlated
+                       matchup win probability, outlooks against every team
+ninecat/league.py      team category totals, build_league(): rosters, worth to every
+                       team, league impact, value over replacement; waivers, fit notes
 ninecat/player.py      player-page numbers: percentiles, position ranks, comparables
 ninecat/charts.py      plotly figures for the player page (pure, no Streamlit)
 ninecat/theme.py       design tokens (light/dark), z-score heat colors, app CSS
 app.py                 Streamlit entry: header, controls, tabs, routing; reads the cache only
-ui/                    Streamlit rendering: tables (components.py), player_page.py
+ui/                    Streamlit rendering: tables (components.py), player_page.py,
+                       league_views.py (my team, waiver wire, team categories)
 .streamlit/config.toml theme: fonts, light and dark palettes
 tests/                 one test file per ninecat module, plus test_app.py (AppTest smoke)
 .github/workflows/tests.yml  runs pytest on 3.11-3.13
@@ -77,6 +84,18 @@ nba.com sources are optional: a failure keeps the old file and is recorded in
   A player exactly at replacement level is unaffected by missed games.
 - A zero std yields z = 0, never NaN.
 - `value_players()` does not mutate its input.
+
+## Matchup model rules (from the original; keep these invariant)
+
+- A team-week counts each player's games (3.5 a week) x availability (GP/82,
+  missing GP = 70) x lineup slot weight (top 10 by value 1.0, next 3 0.75, rest 0.4).
+- Counting variance = games x (mean + (0.3 mean)^2); percentage variance =
+  1.6 p(1-p) / attempts. Category odds = Phi(edge / sd), with TO reversed.
+- Matchup win = majority of categories, normal approximation with the CORR table
+  widening the variance plus 1/12; the 7-digit Abramowitz-Stegun `ncdf` is kept.
+- Season numbers are over 20 weeks. Adding a player drops the team's lowest-value
+  player sharing a position; losing one picks up the best free agent at it.
+  League impact averages the other teams; punts don't enter the matchup model.
 
 ## Conventions
 

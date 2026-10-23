@@ -35,7 +35,8 @@ def no_errors(at):
 def test_board_renders_and_controls_work(app):
     at, players = app
     no_errors(at)
-    assert [t.label for t in at.tabs] == ["Players", "My team", "Waiver wire"]
+    assert [t.label for t in at.tabs] == ["Players", "My team", "Waiver wire", "Team categories"]
+    assert "Impact" in at.dataframe[0].value.columns
     for source in ("proj", "last", "blend"):
         at.segmented_control(key="source").set_value(source).run()
         no_errors(at)
@@ -45,7 +46,14 @@ def test_board_renders_and_controls_work(app):
     no_errors(at)
 
 
-@pytest.mark.parametrize("which", [0, 85])
+def test_without_a_team_league_views_fall_back(app):
+    at, players = app
+    at.selectbox[0].set_value(None).run()
+    no_errors(at)
+
+
+# 0 is on "my team" (Alpha), 1 on another team, 85 a free agent: three impact framings.
+@pytest.mark.parametrize("which", [0, 1, 85])
 def test_player_page_renders(app, which):
     at, players = app
     at.query_params["player"] = str(players["player_id"].iloc[which])
