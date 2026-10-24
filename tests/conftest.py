@@ -52,6 +52,12 @@ def synthetic_players(n: int = 90, seed: int = 3) -> pd.DataFrame:
         df["adv_" + k] = rng.normal(20 if k != "ts" else 0.57, 5 if k != "ts" else 0.04, n)
     rookies = df.index >= n - 10
     df.loc[rookies, [c for c in df.columns if c.startswith(("L_", "adv_", "prev_"))]] = np.nan
+    # This season so far (nba.com S_ line): the first 60 players, a few games in.
+    now = df[["MIN", "PTS", "REB", "AST", "STL", "BLK", "3PM", "TO", "FGA", "FGM", "FTA", "FTM"]]
+    now = now * rng.uniform(0.7, 1.3, (n, 1))
+    for c in now.columns:
+        df["S_" + c] = now[c].where(df.index < 60)
+    df["S_G"] = np.where(df.index < 60, rng.integers(1, 8, n), np.nan).astype(float)
     return df
 
 

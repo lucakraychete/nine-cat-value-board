@@ -1,9 +1,10 @@
-"""Per-game stat lines: ESPN projection, last season, or a blend of both.
+"""Per-game stat lines: ESPN projection, last season, a blend, or this season.
 
 A "line" is the per-game row the valuation runs on: MIN, the counting
 stats, FGM/FGA/FTM/FTA and GP. Projection columns are the ESPN ones
-(PTS, REB, ...); last season's are the same names with an L_ prefix,
-joined from nba.com by player name (see attach_last_season).
+(PTS, REB, ...); last season's are the same names with an L_ prefix and
+this season's from nba.com an S_ prefix, both joined by player name (see
+attach_by_name). ESPN's own season-to-date averages carry a T_ prefix.
 """
 
 from __future__ import annotations
@@ -17,8 +18,12 @@ import pandas as pd
 # Stats every line carries, per game. GP is games played (or projected).
 LINE_STATS = ["MIN", "PTS", "REB", "AST", "STL", "BLK", "3PM", "TO", "FGM", "FGA", "FTM", "FTA"]
 LAST_PREFIX = "L_"
+SEASON_PREFIX = "S_"       # this season to date, from nba.com game logs
+ESPN_TOTAL_PREFIX = "T_"   # this season to date, as ESPN reports it
 
-SOURCES = {"blend": "Blend", "proj": "Projection", "last": "Last season"}
+SOURCES = {"blend": "Blend", "proj": "Projection", "last": "Last season", "season": "This season"}
+# Fewer games than this and "This season" falls back to the blend.
+SEASON_MIN_GAMES = 3
 # Blend = 60% projection, 40% last season, when he played enough to trust it.
 BLEND_WEIGHT = 0.6
 BLEND_MIN_GAMES = 15
@@ -49,13 +54,13 @@ def name_key(name: str) -> str:
     return NAME_ALIASES.get(s, s)
 
 
-def attach_last_season(players: pd.DataFrame, last: pd.DataFrame | None) -> pd.DataFrame:
-    """Left-join last season's columns (keyed by name_key) onto ESPN players."""
+def attach_by_name(players: pd.DataFrame, extra: pd.DataFrame | None) -> pd.DataFrame:
+    """Left-join nba.com columns (keyed by name_key) onto ESPN players."""
     out = players.copy()
-    if last is None or last.empty:
+    if extra is None or extra.empty:
         return out
     keys = out["name"].map(name_key)
-    extra = last.drop_duplicates("name_key").set_index("name_key")
+    extra = extra.drop_duplicates("name_key").set_index("name_key")
     extra = extra.drop(columns=[c for c in extra.columns if c in out.columns])
     joined = extra.reindex(keys)
     joined.index = out.index
@@ -113,6 +118,25 @@ def last_line(df: pd.DataFrame) -> pd.DataFrame:
     return line
 
 
+def season_line(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+    """This season's per-game line, and who has one (3+ games).
+
+    nba.com's numbers come first; ESPN's season-to-date averages fill in
+    players the name join missed. GP is the projection's games for the
+    whole season, so the games discount means the same as for the others.
+    """
+    line = pd.DataFrame(index=df.index)
+    nba_g = df.get(SEASON_PREFIX + "G", pd.Series(np.nan, index=df.index)).fillna(0)
+    espn_g = df.get(ESPN_TOTAL_PREFIX + "GP", pd.Series(np.nan, index=df.index)).fillna(0)
+    use_nba = nba_g >= SEASON_MIN_GAMES
+    for s in LINE_STATS:
+        nba = df.get(SEASON_PREFIX + s, pd.Series(np.nan, index=df.index)).astype(float)
+        espn = df.get(ESPN_TOTAL_PREFIX + s, pd.Series(np.nan, index=df.index)).astype(float)
+        line[s] = nba.where(use_nba, espn)
+    line["GP"] = df["GP"].astype(float) if "GP" in df else np.nan
+    return line, use_nba | (espn_g >= SEASON_MIN_GAMES)
+
+
 def stat_line(df: pd.DataFrame, source: str = "blend") -> pd.DataFrame:
     """The per-game line each player is valued on, as a copy of df.
 
@@ -122,6 +146,8 @@ def stat_line(df: pd.DataFrame, source: str = "blend") -> pd.DataFrame:
       separately so the percentages stay volume-weighted. Players with
       fewer than 15 games last season, or none, use the projection alone;
       players with no projection use last season. GP is the projection's.
+    - "season": this season so far (see season_line); players with fewer
+      than 3 games use the blend.
 
     Rows with no usable line get NaN stats and has_line False.
     """
@@ -143,6 +169,11 @@ def stat_line(df: pd.DataFrame, source: str = "blend") -> pd.DataFrame:
         line = proj.where(has_p, last, axis=0)
         line = mixed.where(use_mix, line, axis=0)
         has = has_p | has_l
+        if source == "season":
+            season, has_s = season_line(df)
+            season["GP"] = season["GP"].where(has_p, line["GP"])
+            line = season.where(has_s, line, axis=0)
+            has = has | has_s
 
     out = df.copy()
     cols = [*LINE_STATS, "GP"]

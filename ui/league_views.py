@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from ninecat import charts
-from ninecat.board import FANTASY_TIERS
+from ninecat.board import FANTASY_TIERS, player_key
 from ninecat.league import FREE_AGENT, League, average_rank, fit_note, team_category_totals, waivers
 from ninecat.matchup import WEEKS
 from ninecat.player import pct3
@@ -22,11 +22,19 @@ from ui.components import (
     delta_css,
     delta_frame,
     html,
-    show_plain,
+    link_style,
+    name_button,
     show_table,
 )
 
 PLOTLY_CONFIG = {"displayModeBar": False}
+CARD_PICKS = 5
+
+
+def _ids(board: pd.DataFrame, positions) -> list:
+    """Player ids for board positions (None stays None, for empty cells)."""
+    keys = player_key(board).to_numpy(object)
+    return [keys[p] if p is not None and p >= 0 else None for p in positions]
 
 
 def _chart(fig, key: str) -> None:
@@ -73,10 +81,15 @@ def render_team_categories(board: pd.DataFrame, lg: League, ctx: dict) -> None:
                   "costs little. Toggle it in Punt categories to re-rank everyone for that build."
                   if rank[weak[0]] >= max(2, n - 2) else
                   "No category is far enough behind to be an obvious punt. A balanced build is reasonable here.")
-        html(f'<div class="callout"><span class="eyebrow">Your build</span>'
-             f'<b>Strongest: {", ".join(f"{c} (#{rank[c]})" for c in strong)}. '
-             f'Weakest: {", ".join(f"{c} (#{rank[c]})" for c in weak)}.</b>'
-             f'<span class="note">{advice}</span></div>')
+        chip = lambda c, cls: f'<span class="catchip {cls}"><b>{c}</b> #{rank[c]} of {n}</span>'
+        with card("build"):
+            html(f'<div class="callout"><span class="eyebrow">Your build · {escape(my_team)}</span>'
+                 f'<b>Average rank {me["avg"]:.1f} of {n} over your scored categories</b></div>'
+                 f'<div class="sw" style="margin-top:8px"><div><div class="card-h4">Strongest</div><div class="chips">'
+                 f'{"".join(chip(c, "pos") for c in strong)}</div></div>'
+                 f'<div><div class="card-h4">Weakest</div><div class="chips">'
+                 f'{"".join(chip(c, "neg") for c in weak)}</div></div></div>'
+                 f'<p class="note">{advice}</p>')
 
     html(f'<p class="note">Rank 1–{n} in each category from each team\'s top 10 players by value, summed per game. '
          'Green is the best in the league, red the worst. Sorted by average rank over non-punted categories.</p>')
@@ -110,7 +123,7 @@ def render_team_categories(board: pd.DataFrame, lg: League, ctx: dict) -> None:
 
 # ---------------------------------------------------------------- my team
 
-def render_my_team(board: pd.DataFrame, lg: League, ctx: dict, pick_player) -> None:
+def render_my_team(board: pd.DataFrame, lg: League, ctx: dict, open_player) -> None:
     me, cats, t = ctx["my_team"], ctx["cats"], ctx["tokens"]
     if not me or me not in lg.base:
         st.info("Pick your team at the top to see your roster, category outlook and best moves.")
@@ -174,25 +187,58 @@ def render_my_team(board: pd.DataFrame, lg: League, ctx: dict, pick_player) -> N
     with card("roster"):
         card_title("Roster", "Worth to you is how many category wins over the season you'd lose by replacing him "
                    "with the best free agent at his position. The bottom of this list is where your drops come from. "
-                   "Select a player for his page.")
-        repl = pd.Series([lg.names[lg.repl[i]] if lg.repl[i] >= 0 else "replacement" for i in pos],
-                         index=board.index[pos])
+                   "Click a name for his page.")
+        repl_pos = pd.Series([lg.repl[i] for i in pos], index=board.index[pos]).loc[worth.index]
+        repl = pd.Series([lg.names[r] if r >= 0 else "replacement" for r in repl_pos], index=repl_pos.index)
         styler, config = category_table(roster, cats, ctx["punt"], None, ctx["abbrevs"], ctx["mode"],
-                                        extra={"Worth to you": worth, "vs FA": repl.loc[worth.index]})
+                                        extra={"Worth to you": worth, "vs FA": repl})
+        styler = styler.map(lambda _: link_style(t), subset=["vs FA"])
         config["Worth to you"] = st.column_config.NumberColumn(
             width=80, help="Category wins over the season you'd lose replacing him with the best FA")
-        config["vs FA"] = st.column_config.TextColumn(width="medium", help="The free agent he's measured against")
-        pick_player(roster, show_table(styler, config, key=f"mt_roster_{ctx['epoch']}", height="auto"))
+        config["vs FA"] = st.column_config.TextColumn(width="medium")
+        open_player(show_table(styler, config, key=f"mt_roster_{ctx['epoch']}", height="auto", links={
+            "Player": list(player_key(roster)), "vs FA": _ids(board, repl_pos)}))
 
     with card("adds"):
         card_title("Best free-agent adds for you", f"Each free agent is tried against every possible drop from your "
                    f"roster, simulated over {WEEKS} weeks; the best drop is shown. Category columns show the change "
                    "in expected wins.")
         picks, _, _ = cached_waivers(lg, ctx["league_key"], me)
-        _pickup_table(lg, picks[:10], ctx, key=f"mt_adds_{ctx['epoch']}", pick_player=pick_player, board=board)
+        _pickup_table(lg, picks[:10], ctx, key=f"mt_adds_{ctx['epoch']}", open_player=open_player, board=board)
 
 
-def _pickup_table(lg: League, picks, ctx: dict, key: str, pick_player, board: pd.DataFrame) -> None:
+def _pickup_cards(lg: League, picks, ctx: dict, board: pd.DataFrame, open_player) -> None:
+    """The top pickups as cards: name, gain, best drop, top category gains, fit."""
+    me, cats, epoch = ctx["my_team"], ctx["cats"], ctx["epoch"]
+    ids = player_key(board).to_numpy(object)
+    picks = picks[:CARD_PICKS]
+    for i, (col, p) in enumerate(zip(st.columns(CARD_PICKS), picks)):
+        r = board.iloc[p.player]
+        gains = sorted(((c, v) for c, v in zip(cats, p.change.by_cat) if v > 0.05), key=lambda x: -x[1])[:3]
+        cost = min(zip(cats, p.change.by_cat), key=lambda x: x[1])
+        chips = "".join(f'<span class="catchip pos"><b>{c}</b> {v:+.1f}</span>' for c, v in gains)
+        if cost[1] < -0.15:
+            chips += f'<span class="catchip neg"><b>{cost[0]}</b> {cost[1]:+.1f}</span>'
+        f = fit_note(lg, p.change.by_cat, me)
+        with col, card(f"pick_{i}"):
+            html(f'<div class="eyebrow">#{i + 1} pickup · {escape(str(r.get("eligible") or ""))} · '
+                 f'{escape(str(r.get("pro_team") or ""))}</div>')
+            name_button(lg.names[p.player], ids[p.player], f"pname_pick_{i}_{epoch}", open_player)
+            cls = "pos" if p.change.cats > 0.005 else "neg" if p.change.cats < -0.005 else ""
+            html(f'<div class="cardstat"><b class="{cls}">{p.change.cats:+.1f}</b>'
+                 f'<span>category wins over {WEEKS} weeks</span></div>'
+                 f'<p class="note" style="margin:0">Weekly matchup win chance {p.change.win * 100:+.1f} pts</p>'
+                 '<div class="card-h4">Best drop</div>')
+            name_button(lg.names[p.drop], ids[p.drop], f"plink_drop_{i}_{epoch}", open_player)
+            alt = (f"Next best drop: {escape(lg.names[p.alt])} ({p.alt_cats:+.1f})" if p.alt is not None else "")
+            if p.il is not None:
+                alt += f"{'. ' if alt else ''}Or move {escape(lg.names[p.il])} to IL, no drop: {p.il_cats:+.1f}"
+            html((f'<p class="note" style="margin:0">{alt}</p>' if alt else "")
+                 + f'<div class="chips">{chips or "<span class=note>No single category moves much</span>"}</div>'
+                 f'<p class="note"><b class="{"pos" if f.good else ""}">{escape(f.text)}</b></p>')
+
+
+def _pickup_table(lg: League, picks, ctx: dict, key: str, open_player, board: pd.DataFrame) -> None:
     cats, me = ctx["cats"], ctx["my_team"]
     if not picks:
         html('<p class="note">No free agents to try.</p>')
@@ -219,21 +265,24 @@ def _pickup_table(lg: League, picks, ctx: dict, key: str, pick_player, board: pd
     good, bad = f"color: {ctx['tokens']['good']}; font-weight: 600", f"color: {ctx['tokens']['bad']}; font-weight: 600"
     css["Season +"] = np.where(frame["Season +"] > 0.005, good, np.where(frame["Season +"] < -0.005, bad, ""))
     css["Team fit"] = ["font-weight: 600; color: " + ctx["tokens"]["good"] if f[0].startswith("✓") else "" for f in fits]
+    css["Player"] = css["Best drop"] = link_style(ctx["tokens"])
     fmt = {"Season +": "{:+.1f}", "Matchup win": "{:+.1f} pts", "Value": "{:+.2f}", **{c: "{:+.1f}" for c in cats}}
     styler = frame.style.apply(lambda _: css, axis=None).format(fmt)
     config = {"Player": st.column_config.TextColumn(width="medium", pinned=True),
+              "Best drop": st.column_config.TextColumn(width="medium"),
               "Season +": st.column_config.NumberColumn(width=72, help=f"Extra category wins over {WEEKS} weeks"),
               "Matchup win": st.column_config.NumberColumn(width=90, help="Change in weekly matchup win chance"),
               "Team fit": st.column_config.TextColumn(width="medium"),
               "Fit detail": st.column_config.TextColumn(width="large"),
               **{c: st.column_config.NumberColumn(width=52) for c in cats}}
-    view = board.iloc[[p.player for p in picks]]
-    pick_player(view, show_table(styler, config, key=key, height="auto"))
+    open_player(show_table(styler, config, key=key, height="auto", links={
+        "Player": _ids(board, [p.player for p in picks]), "Best drop": _ids(board, [p.drop for p in picks])}))
 
 
 # ---------------------------------------------------------------- waiver wire
 
-def render_waivers(board: pd.DataFrame, lg: League, ctx: dict, pick_player) -> None:
+
+def render_waivers(board: pd.DataFrame, lg: League, ctx: dict, open_player) -> None:
     me, cats = ctx["my_team"], ctx["cats"]
     if not me or me not in lg.base:
         fa = board[board["fantasy_team"] == FREE_AGENT].sort_values("impact", ascending=False).head(30)
@@ -247,7 +296,8 @@ def render_waivers(board: pd.DataFrame, lg: League, ctx: dict, pick_player) -> N
         styler, config = category_table(fa, cats, ctx["punt"], None, ctx["abbrevs"], ctx["mode"],
                                         extra={"Biggest gains": pd.Series(gains, index=fa.index)})
         config["Biggest gains"] = st.column_config.TextColumn(width="large")
-        pick_player(fa, show_table(styler, config, key=f"fa_avg_{ctx['epoch']}", height=640))
+        open_player(show_table(styler, config, key=f"fa_avg_{ctx['epoch']}", height=640,
+                               links={"Player": list(player_key(fa))}))
         return
 
     picks, drops, out_player = cached_waivers(lg, ctx["league_key"], me)
@@ -260,7 +310,12 @@ def render_waivers(board: pd.DataFrame, lg: League, ctx: dict, pick_player) -> N
          f'{il_note}Values are extra category wins over {WEEKS} weeks.</span></div>')
     healthy = st.toggle("Hide injured (OUT)", value=True, key="fa_healthy")
     shown = [p for p in picks if not (healthy and lg.injury[p.player] == "OUT")][:30]
-    _pickup_table(lg, shown, ctx, key=f"fa_picks_{ctx['epoch']}", pick_player=pick_player, board=board)
+    if shown:
+        _pickup_cards(lg, shown, ctx, board, open_player)
+    with card("all_picks"):
+        card_title("Every pickup", f"The top {len(shown)} free agents, each with his best drop. Category columns "
+                   "show the change in expected wins; click a player or a drop for his page.")
+        _pickup_table(lg, shown, ctx, key=f"fa_picks_{ctx['epoch']}", open_player=open_player, board=board)
 
     with card("drops"):
         card_title("Who to drop to make room", "Each player on your roster, with the best pickup you could swap him "
@@ -282,10 +337,15 @@ def render_waivers(board: pd.DataFrame, lg: League, ctx: dict, pick_player) -> N
         good = f"color: {ctx['tokens']['good']}; font-weight: 600"
         css["Verdict"] = np.where(frame["Verdict"] == "Drop candidate", good, "")
         css["Best swap"] = np.where(frame["Best swap"] > 0, good, "")
+        css["Your player"] = css["Pick up"] = link_style(ctx["tokens"])
         fmt = {"Best swap": "{:+.1f}", "Worth to you": "{:+.1f}", **{c: "{:+.1f}" for c in cats}}
-        show_plain(frame.style.apply(lambda _: css, axis=None).format(fmt),
-                   {"Your player": st.column_config.TextColumn(width="medium", pinned=True),
-                    "Pick up": st.column_config.TextColumn(width="medium"),
-                    **{c: st.column_config.NumberColumn(width=52) for c in cats}})
-    html('<p class="note">Week-by-week streams against your actual opponent need the NBA weekly schedule and your '
-         'league schedule, which the board doesn\'t pull yet.</p>')
+        open_player(show_table(
+            frame.style.apply(lambda _: css, axis=None).format(fmt),
+            {"Your player": st.column_config.TextColumn(width="medium", pinned=True),
+             "Pick up": st.column_config.TextColumn(width="medium"),
+             **{c: st.column_config.NumberColumn(width=52) for c in cats}},
+            key=f"fa_drops_{ctx['epoch']}", height="auto",
+            links={"Your player": _ids(board, [d.player for d in drops]),
+                   "Pick up": _ids(board, [d.best for d in drops])}))
+    html('<p class="note">Week-by-week streams against your actual opponent arrive with the weekly tools '
+         '(the NBA and matchup schedules are now cached).</p>')

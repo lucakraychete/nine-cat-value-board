@@ -23,6 +23,7 @@ from ninecat.player import (
     primary_position,
     rate_items,
     rolling_minutes,
+    season_so_far,
     stat_lines,
 )
 from ui.components import (
@@ -37,6 +38,7 @@ from ui.components import (
     h4,
     html,
     legend,
+    link_style,
     show_plain,
     show_table,
     tags,
@@ -57,6 +59,32 @@ def _uncertainty_tile(lg: League, idx: int, r: pd.Series) -> str:
     u = uncertainty(lg.impact[idx], r.get("L_G"), r.get("injury_status"))
     return (f'<div title="{escape(u.why)}"><b>{u.low:+.1f} to {u.high:+.1f}</b>'
             f'<span>impact range · {u.label}</span></div>')
+
+
+def _season_strip(r: pd.Series, season: str) -> str:
+    """This season's per-game line in one row of tiles, plus recent minutes."""
+    now = season_so_far(r)
+    if now is None:
+        return f'<p class="note">No {season} games yet.</p>'
+    games = int(now["G"])
+    pct = lambda m, a: f"{now[m] / now[a]:.3f}".lstrip("0") if now[a] > 0 else "–"
+    cells = [(f"{now['PTS']:.1f}", "PTS"), (f"{now['REB']:.1f}", "REB"), (f"{now['AST']:.1f}", "AST"),
+             (f"{now['STL']:.1f}", "STL"), (f"{now['BLK']:.1f}", "BLK"), (f"{now['3PM']:.1f}", "3PM"),
+             (pct("FGM", "FGA"), "FG%"), (pct("FTM", "FTA"), "FT%"), (f"{now['TO']:.1f}", "TO"),
+             (f"{now['MIN']:.1f}", "MIN")]
+    recent = []
+    for days in (7, 15):
+        g, m = r.get(f"S_G_{days}D"), r.get(f"S_MIN_{days}D")
+        if pd.notna(g) and g > 0 and pd.notna(m):
+            recent.append(f"last {days} days {m:.1f} min ({int(g)} g)")
+    if pd.notna(r.get("S_MIN_L5")):
+        recent.append(f"last 5 games {r['S_MIN_L5']:.1f} min")
+    sub = f"{season} so far · {games} game{'s' if games != 1 else ''}"
+    if games < 3:
+        sub += " · the This season source waits for 3"
+    tiles = "".join(f"<div><b>{escape(v)}</b><span>{k}</span></div>" for v, k in cells)
+    tail = f'<p class="note">Minutes: {", ".join(recent)}.</p>' if recent else ""
+    return f'<div class="eyebrow" style="margin-top:10px">{sub}</div><div class="tiles">{tiles}</div>{tail}'
 
 
 def _impact_section(board: pd.DataFrame, lg: League, i: int, ctx: dict, open_player) -> None:
@@ -158,10 +186,13 @@ def _impact_section(board: pd.DataFrame, lg: League, i: int, ctx: dict, open_pla
             frame["Fit detail"] = [f.gains + (f" · costs {f.losses}" if f.losses else "") for f in fits]
             css = pd.DataFrame("", index=frame.index, columns=frame.columns)
             css[cats] = delta_css(deltas, ctx["mode"])
-            show_plain(frame.style.apply(lambda _: css, axis=None).format(
+            css["Drop"] = link_style(t)
+            keys = player_key(board).to_numpy(object)
+            open_player(show_table(frame.style.apply(lambda _: css, axis=None).format(
                 {"Season +": "{:+.1f}", **{c: "{:+.1f}" for c in cats}}),
                 {"Drop": st.column_config.TextColumn(width="medium"),
-                 **{c: st.column_config.NumberColumn(width=52) for c in cats}})
+                 **{c: st.column_config.NumberColumn(width=52) for c in cats}},
+                key=f"pp_drops_{ctx['epoch']}", height="auto", links={"Drop": [keys[o.drop] for o in top]}))
 
 
 def r_owner(lg: League, i: int) -> str:
@@ -233,6 +264,7 @@ def render(board: pd.DataFrame, players: pd.DataFrame, pid, ctx: dict, open_play
             <div><b>{'#' + str(int(r['p36_rank'])) if pd.notna(r['p36_rank']) else '–'}</b><span>Per-36 rank</span></div>
             <div><b>{'#' + str(int(r['p100_rank'])) if pd.notna(r['p100_rank']) else '–'}</b><span>Per-100-poss rank</span></div>
             <div><b>{fmt_num(adp)}</b><span>ADP {gap_txt}</span></div>{_uncertainty_tile(lg, idx, r)}</div>""")
+    html(_season_strip(r, ctx["seasons"]["current"]))
 
     # ---- tier ladder
     with card("tier"):
@@ -291,12 +323,13 @@ def render(board: pd.DataFrame, players: pd.DataFrame, pid, ctx: dict, open_play
     # ---- comparables
     with card("comps"):
         card_title(f"Comparable {pos}s", f"The six {pos}-eligible players closest in value, for trade and "
-                                         "waiver comparisons. Select one to open his page.")
+                                         "waiver comparisons. Click a name to open his page.")
         comps = comparables(board, idx)
         styler, config = category_table(comps, cats, ctx["punt"], ctx["my_team"], ctx["abbrevs"], ctx["mode"])
-        pick = show_table(styler, config, key=f"pp_comps_{pid}_{ctx['epoch']}", height="auto")
-        if pick is not None and player_key(comps).iloc[pick] != r.get("player_id", r["name"]):
-            open_player(player_key(comps).iloc[pick])
+        pick = show_table(styler, config, key=f"pp_comps_{pid}_{ctx['epoch']}", height="auto",
+                          links={"Player": list(player_key(comps))})
+        if pick is not None and str(pick) != str(pid):
+            open_player(pick)
 
     # ---- minutes and efficiency
     left, right = st.columns(2)
@@ -322,7 +355,7 @@ def render(board: pd.DataFrame, players: pd.DataFrame, pid, ctx: dict, open_play
             legend([(t["s1"], "5-game average"), (t["s2"], "10-game average")])
             _chart(charts.rolling_minutes_chart(g, t), "pp_rolling")
             html(f'<p class="note">Last 5 games {g["r5"].iloc[-1]:.1f} min, last 10 {g["r10"].iloc[-1]:.1f}, '
-                 f'against {g["min"].mean():.1f} over the window.</p>')
+                 f'against {g["MIN"].mean():.1f} over the window.</p>')
     with right, card("efficiency"):
         card_title("Efficiency ranks", f"Percentile overall (top 200) and among {pos}s. "
                                        "The middle tick is the 50th percentile.")
@@ -340,15 +373,18 @@ def render(board: pd.DataFrame, players: pd.DataFrame, pid, ctx: dict, open_play
             _chart(charts.percentile_bars(rate_items(board, idx), t, pos), "pp_rates")
 
     with card("lines"):
-        card_title("Stat lines", "Per game, per 36 minutes and per 100 possessions.")
+        card_title("Stat lines", "Per game, per 36 minutes and per 100 possessions. G is the games behind each "
+                                 "line (projected games for the projection and the board line).")
         pace = ctx["pace"].get(r["pro_team"])
         lines = stat_lines(raw.head(1), r, ctx["pace"], {
+            "season": f"{ctx['seasons']['current']} so far",
+            "recent": "Last 15 days (ESPN)",
             "proj": f"{ctx['seasons']['current']} ESPN projection",
             "last": f"{ctx['seasons']['last']} actual",
             "board": f"Board line: {SOURCES[ctx['source']]}",
             "per100": f"Per 100 possessions ({r['pro_team']} pace {pace:.1f})" if pace else "Per 100 possessions",
         })
-        fmt = {c: "{:.1f}" for c in lines.columns if c not in ("Line", "FG%", "FT%")}
-        fmt.update({"FG%": fmt_pct, "FT%": fmt_pct})
+        fmt = {c: "{:.1f}" for c in lines.columns if c not in ("Line", "G", "FG%", "FT%")}
+        fmt.update({"G": "{:.0f}", "FG%": fmt_pct, "FT%": fmt_pct})
         st.dataframe(lines.style.format(fmt, na_rep="–"), hide_index=True, row_height=30, placeholder="–",
                      column_config={"Line": st.column_config.TextColumn(width="large")})

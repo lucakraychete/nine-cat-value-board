@@ -68,6 +68,7 @@ def app_css(mode: str | None) -> str:
 h1, h2, h3 {{ font-family: var(--display) !important; letter-spacing: .01em; }}
 h1 {{ font-size: 34px !important; font-weight: 700 !important; line-height: 1 !important; padding: 0 !important; }}
 .eyebrow {{ font-size: 11px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); }}
+.eyebrow a {{ color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }}
 .sub, .note {{ color: var(--muted); font-size: 13px; max-width: 75ch; margin: 4px 0 0; }}
 .sub {{ font-size: 14px; max-width: 70ch; }}
 .num {{ font-variant-numeric: tabular-nums; }}
@@ -110,6 +111,7 @@ h1 {{ font-size: 34px !important; font-weight: 700 !important; line-height: 1 !i
 .callout {{ border-left: 3px solid var(--accent); padding: 4px 0 4px 12px; display: grid; gap: 4px; }}
 .callout b {{ font-family: var(--display); font-size: 18px; font-weight: 600; }}
 .status {{ display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 13px; color: var(--muted); }}
+.status .updating {{ color: var(--accent); font-weight: 600; }}
 .hero {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 6px 0; }}
 .hero div {{ background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
   display: grid; gap: 2px; min-width: 0; }}
@@ -119,6 +121,19 @@ h1 {{ font-size: 34px !important; font-weight: 700 !important; line-height: 1 !i
 .hero span {{ font-size: 12px; color: var(--muted); }}
 .catchip {{ font-size: 12px; padding: 4px 9px; border-radius: 999px; border: 1px solid var(--line);
   background: var(--bg); font-variant-numeric: tabular-nums; color: var(--ink); }}
+.catchip.pos {{ border-color: var(--good); }} .catchip.neg {{ border-color: var(--bad); }}
+.catchip.pos b {{ color: var(--good); }} .catchip.neg b {{ color: var(--bad); }}
+/* player names rendered as buttons (cards): read as links */
+[class*="st-key-pname_"] button, [class*="st-key-plink_"] button {{ padding: 0 !important; min-height: 0 !important;
+  justify-content: flex-start; }}
+[class*="st-key-pname_"] button p {{ font-family: var(--display); font-size: 20px !important; font-weight: 700;
+  color: var(--accent); line-height: 1.1; text-align: left; }}
+[class*="st-key-plink_"] button p {{ font-size: 13px !important; font-weight: 600; color: var(--accent); }}
+[class*="st-key-pname_"] button:hover p, [class*="st-key-plink_"] button:hover p {{ text-decoration: underline; }}
+.cardstat {{ display: flex; align-items: baseline; gap: 8px; margin: 2px 0; }}
+.cardstat b {{ font-family: var(--display); font-size: 30px; font-weight: 700; line-height: 1;
+  font-variant-numeric: tabular-nums; }}
+.cardstat span {{ font-size: 12px; color: var(--muted); }}
 .sw {{ display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }}
 .ltable {{ overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }}
 .ltable table {{ border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 13px; color: var(--ink); }}

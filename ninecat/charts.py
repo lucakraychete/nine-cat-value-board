@@ -97,10 +97,10 @@ def minutes_chart(points: Sequence[tuple[str, float, bool]], t: dict) -> go.Figu
 
 def rolling_minutes_chart(games, t: dict) -> go.Figure:
     """Minutes by game (dots) with 5- and 10-game rolling averages and the window average."""
-    avg = float(games["min"].mean())
+    avg = float(games["MIN"].mean())
     x = list(range(len(games)))
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=games["min"], mode="markers", marker=dict(size=5, color=rgba(t["muted"], 0.5)),
+    fig.add_trace(go.Scatter(x=x, y=games["MIN"], mode="markers", marker=dict(size=5, color=rgba(t["muted"], 0.5)),
                              customdata=games["date"], hovertemplate="%{customdata}: %{y:.0f} min<extra></extra>"))
     fig.add_trace(go.Scatter(x=x, y=games["r10"], mode="lines", line=dict(color=t["s2"], width=2),
                              hovertemplate="10-game avg %{y:.1f}<extra></extra>"))
@@ -110,7 +110,7 @@ def rolling_minutes_chart(games, t: dict) -> go.Figure:
                   annotation_text=f"avg {avg:.1f}", annotation_position="top right",
                   annotation_font=dict(size=10, color=t["muted"]))
     _layout(fig, t, 220, margin=dict(l=30, r=12, t=8, b=30))
-    hi = max(40.0, float(games["min"].max()))
+    hi = max(40.0, float(games["MIN"].max()))
     fig.update_yaxes(range=[0, hi + 2], tickvals=[0, 10, 20, 30, 40], gridcolor=t["line"],
                      tickfont=dict(color=t["muted"], size=10), fixedrange=True, zeroline=False)
     fig.update_xaxes(tickvals=[0, len(games) - 1], ticktext=[games["date"].iloc[0], games["date"].iloc[-1]],

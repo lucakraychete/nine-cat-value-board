@@ -27,7 +27,7 @@ def test_beeswarm_levels_never_overlap_on_the_same_level():
 
 def test_figures_build():
     item = RankItem("Usage", "share", "30.0%", 80.0, None, "#3 · C #1")
-    games = pd.DataFrame({"date": ["2026-01-01", "2026-01-03"], "min": [30.0, 34.0],
+    games = pd.DataFrame({"date": ["2026-01-01", "2026-01-03"], "MIN": [30.0, 34.0],
                           "r5": [30.0, 32.0], "r10": [30.0, 32.0]})
     figs = [
         charts.tier_ladder(12, T),

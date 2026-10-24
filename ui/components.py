@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from html import escape
 
 import numpy as np
@@ -11,11 +12,13 @@ import streamlit as st
 from ninecat.board import ADVANCED_METRICS
 from ninecat.player import pct3
 from ninecat.theme import heat, rgba, tokens
+from ninecat.urlstate import link_target
 from ninecat.valuation import z_col
 
 FREE_AGENT = "FA"
 DASH = "–"
 ROW_HEIGHT = 30
+LINK_HELP = "Click a name to open his page"
 
 
 def theme_mode() -> str:
@@ -153,7 +156,7 @@ def category_table(board: pd.DataFrame, cats: list[str], punt: list[str], my_tea
     css["Gap"] = np.where(frame["Gap"] >= 10, f"color: {t['good']}; font-weight: 600",
                           np.where(frame["Gap"] <= -10, f"color: {t['bad']}; font-weight: 600", ""))
     css["Value"] = "font-weight: 600"
-    css["Player"] = "font-weight: 500"
+    css["Player"] = link_style(t)
     _impact_css(css, frame, t)
 
     formats = {"Value": "{:+.2f}", "Impact": "{:+.1f}", "Min": "{:.1f}", "GP": "{:.0f}", "ADP": "{:.1f}",
@@ -212,7 +215,7 @@ def advanced_table(board: pd.DataFrame, my_team: str | None, abbrevs: dict[str, 
     good, bad = f"color: {t['good']}; font-weight: 600", f"color: {t['bad']}; font-weight: 600"
     css = pd.DataFrame("", index=frame.index, columns=frame.columns)
     css["Value"] = "font-weight: 600"
-    css["Player"] = "font-weight: 500"
+    css["Player"] = link_style(t)
     _impact_css(css, frame, t)
     css["P36 Rk"] = np.where(frame["Rk"] - frame["P36 Rk"] >= 25, good, "")
     css["P100 Rk"] = np.where(frame["Rk"] - frame["P100 Rk"] >= 25, good, "")
@@ -252,10 +255,30 @@ def fit_height(styler, height: int | str, max_height: int = 680) -> int | str:
     return min(max_height, ROW_HEIGHT * (len(styler.data) + 1) + 3)
 
 
-def show_table(styler, config, key: str, height: int | str = 560):
-    """Dense sortable table; returns the selected row position, if any."""
+def show_table(styler, config, key: str, links: Mapping[str, Sequence] | None = None,
+               height: int | str = 560):
+    """Dense sortable table whose name cells are links.
+
+    links maps each name column to the player ids in row order; clicking
+    one of those cells returns its player id (None otherwise). Sorting by
+    a column header doesn't change which id a row maps to.
+    """
     height = fit_height(styler, height)
+    config = dict(config)
+    for col in links or {}:
+        config[col] = {**(config.get(col) or {}), "help": LINK_HELP}
     event = st.dataframe(styler, column_config=config, hide_index=True, height=height, row_height=ROW_HEIGHT,
-                         on_select="rerun", selection_mode="single-row", key=key, placeholder=DASH)
-    rows = event.selection.rows if event is not None else []
-    return rows[0] if rows else None
+                         on_select="rerun", selection_mode="single-cell", key=key, placeholder=DASH)
+    cells = event.selection.cells if event is not None else []
+    return link_target(cells, links or {})
+
+
+def link_style(t: dict) -> str:
+    """Cell CSS for a clickable player name."""
+    return f"color: {t['accent']}; font-weight: 600"
+
+
+def name_button(name: str, pid, key: str, on_open) -> None:
+    """A player's name as a link-styled button that opens his page."""
+    if st.button(name, key=key, type="tertiary", help="Open his page"):
+        on_open(pid)

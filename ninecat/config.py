@@ -29,6 +29,12 @@ RAW_STATS = ["PTS", "REB", "AST", "STL", "BLK", "3PM", "TO", "FGM", "FGA", "FTM"
 DEFAULT_POOL_SIZE = 130
 SEASON_GAMES = 82
 
+# Model history: regular seasons from 2017-18 through last season.
+HISTORY_FIRST_SEASON_START = 2017
+# The NBA schedule and last season's nba.com numbers barely change, so
+# they're refetched about once a week rather than on every refresh.
+STATIC_MAX_AGE_DAYS = 7
+
 
 def categories(exclude_to: bool) -> list[str]:
     """Scoring categories in display order. 8 cats when turnovers are excluded."""
@@ -51,6 +57,7 @@ class Settings:
     espn_s2: str | None
     swid: str | None
     exclude_to: bool = True
+    auto_refresh: bool = True
 
     @property
     def categories(self) -> list[str]:
@@ -74,4 +81,5 @@ def load_settings(env_file: Path | None = None) -> Settings:
         espn_s2=os.getenv("ESPN_S2") or None,
         swid=os.getenv("SWID") or None,
         exclude_to=_env_bool(os.getenv("EXCLUDE_TO"), default=True),
+        auto_refresh=_env_bool(os.getenv("AUTO_REFRESH"), default=True),
     )

@@ -28,16 +28,29 @@ and **8-cat** leagues without turnovers (`EXCLUDE_TO=true`, the default).
   Because the pool depends on the values and vice versa, it iterates until
   the pool stops changing.
 - **Stats source.** Value players on ESPN's projection, last season's actual
-  stats, or a blend (60% projection, 40% last season for anyone who played
-  15+ games).
+  stats, a blend (60% projection, 40% last season for anyone who played
+  15+ games), or this season so far (nba.com box scores; players with fewer
+  than 3 games use the blend).
+- **Live data, refreshed on start.** Each time the app starts it pulls ESPN
+  and nba.com in the background while showing the saved copy, then offers a
+  reload. The status line says when each source last updated and flags any
+  running on an old saved copy. Along with rosters and projections it keeps
+  this season's game logs, ESPN's last 7/15/30-day averages, injuries, the
+  NBA schedule, your league's matchup calendar and live matchup totals, a
+  growing log of league transactions, and a daily snapshot of ESPN's
+  projections.
 - **Advanced stats.** USG%, TS%, AST%, TRB%, STL%, BLK%, TOV%, PER and BPM,
   plus per-36-minute and per-100-possession value ranks: who produces when
   he plays, regardless of role.
 - **Market check.** ESPN average draft position, market rank and the gap
   between market rank and value rank.
-- **Player pages.** Select any player for his fantasy tier and NBA role,
-  category profile against his position, comparable players, minutes trend
-  and efficiency ranks.
+- **Player pages.** Click any player's name, in any table or card, for his
+  fantasy tier and NBA role, this season so far, category profile against
+  his position, comparable players, minutes trend and efficiency ranks.
+- **Shareable views.** Every setting (team, stats source, punts, games
+  discount, tab, filters) lives in the URL, so a link or a reload brings
+  back exactly what you were looking at, and the browser's Back button
+  returns from a player page to the same tab.
 
 - **Head-to-head matchup model.** Each team's week is simulated category by
   category, with weekly variance and correlated categories (rebounds, blocks
@@ -50,9 +63,10 @@ and **8-cat** leagues without turnovers (`EXCLUDE_TO=true`, the default).
 The app has four tabs: **Players** (everyone, filterable, with a Categories
 or Advanced column set and league impact), **My team** (projected standing,
 category outlook, matchup odds against every team, what each player is
-worth to you, best pickups), **Waiver wire** (every free agent tried
-against every possible drop) and **Team categories** (each team's
-per-game category totals and league ranks, plus projected standings).
+worth to you, best pickups), **Waiver wire** (the top five pickups as
+cards, then every free agent tried against every possible drop) and
+**Team categories** (your build, each team's per-game category totals and
+league ranks, plus projected standings).
 It follows your system's light or dark mode; switch in the app's settings menu.
 
 Data comes from ESPN (your league, projections, ADP), nba.com via
@@ -96,18 +110,23 @@ Edit `.env` with your league details:
 | `ESPN_S2`    | Login cookie, needed for private leagues (see below) |
 | `SWID`       | Login cookie, needed for private leagues; also identifies your team |
 | `EXCLUDE_TO` | `true` for 8-cat (no turnovers), `false` for 9-cat |
+| `AUTO_REFRESH` | `true` (default) refreshes ESPN and nba.com in the background each time the app starts |
 
 Then pull data and start the app:
 
 ```bash
 source .venv/bin/activate       # Windows Git Bash: source .venv/Scripts/activate
                                 # Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m ninecat.ingest        # caches rosters, free agents, projections to data/
+python -m ninecat.ingest        # caches your league and nba.com stats to data/
+python -m ninecat.ingest --history   # once: 2017-18 onward for the projection model (~20 s)
 streamlit run app.py
 ```
 
-Re-run the ingest (or press **Refresh from ESPN** in the app) whenever you
-want fresh rosters and projections.
+Run `streamlit run app.py` from the project folder (where `app.py` is). With
+`AUTO_REFRESH=true` you rarely need the ingest command: the app refreshes
+when it starts, and **Refresh now** pulls again at any time. The NBA
+schedule and last season's numbers are refetched about once a week, and
+past seasons (`--history`) only once.
 
 ## Finding ESPN_S2 and SWID
 
@@ -144,10 +163,11 @@ Project layout:
 ```
 ninecat/
   config.py      settings from .env, category definitions
-  ingest.py      ESPN (+ nba.com via nbastats.py) -> data/ cache
+  ingest.py      ESPN (+ nba.com via nbastats.py) -> data/ cache, --history
   nbastats.py    nba.com and Basketball Reference fetches
+  schedule.py    NBA schedule and matchup-period calendar helpers
   rates.py       advanced rate stats from box-score totals
-  lines.py       stats sources (projection, last season, blend), per-36, per-100
+  lines.py       stats sources (projection, last season, blend, this season), per-36, per-100
   valuation.py   z-scores, percentage impact, punts, games discount, iterative pool
   board.py       the board: value plus per-36/per-100, market gap, tiers
   matchup.py     head-to-head matchup model
@@ -155,8 +175,9 @@ ninecat/
   player.py      player-page numbers
   charts.py      plotly charts
   theme.py       colors, fonts, CSS
+  urlstate.py    settings in the URL, player links
 app.py           Streamlit entry point
-ui/              Streamlit rendering (tables, player page)
+ui/              Streamlit rendering (tables, player page, background refresh)
 tests/           pytest suite, synthetic data, no network
 ```
 

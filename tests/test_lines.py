@@ -4,7 +4,7 @@ import pytest
 
 from ninecat.lines import (
     BLEND_WEIGHT,
-    attach_last_season,
+    attach_by_name,
     name_key,
     per36,
     per100,
@@ -36,13 +36,13 @@ def test_name_key_aliases_known_nicknames():
     assert name_key("Herbert Jones") == name_key("Herb Jones")
 
 
-def test_attach_last_season_joins_by_name_without_clobbering():
+def test_attach_by_name_joins_by_name_without_clobbering():
     players = pd.DataFrame({"name": ["Nikola Jokić", "Rookie"], "PTS": [28.0, 10.0]})
     last = pd.DataFrame({"name_key": ["nikola jokic"], "L_PTS": [29.6], "PTS": [999.0]})
-    out = attach_last_season(players, last)
+    out = attach_by_name(players, last)
     assert out["L_PTS"].tolist()[0] == 29.6 and np.isnan(out["L_PTS"].tolist()[1])
     assert out["PTS"].tolist() == [28.0, 10.0]
-    assert attach_last_season(players, None).equals(players)
+    assert attach_by_name(players, None).equals(players)
 
 
 def test_projection_source_uses_espn_line():
@@ -89,6 +89,36 @@ def test_blend_ignores_small_last_season_samples():
 def test_blend_uses_last_season_when_no_projection():
     out = stat_line(one(stat_source=None, PTS=0.0, MIN=0.0), "blend").iloc[0]
     assert out["PTS"] == 10.0
+
+
+def season_cols(prefix="S_", games=5.0, **kw):
+    """This season's line under nba.com's S_ prefix (games in S_G) or ESPN's T_ (games in T_GP)."""
+    base = dict(MIN=34.0, PTS=30.0, REB=8.0, AST=6.0, STL=2.0, BLK=1.0, TO=3.0, FGM=11.0, FGA=20.0,
+                FTM=5.0, FTA=6.0, **{"3PM": 3.0})
+    base.update(kw)
+    cols = {prefix + k: v for k, v in base.items()}
+    cols[prefix + ("G" if prefix == "S_" else "GP")] = games
+    return cols
+
+
+def test_season_source_uses_this_seasons_line_and_projected_games():
+    out = stat_line(one(**season_cols()), "season").iloc[0]
+    assert (out["PTS"], out["FGA"], out["3PM"], out["GP"]) == (30.0, 20.0, 3.0, 70.0)
+    assert out["has_line"]
+
+
+def test_season_source_falls_back_to_espn_then_to_the_blend():
+    espn = stat_line(one(**season_cols(games=2.0), **season_cols("T_", 4.0, PTS=26.0)), "season").iloc[0]
+    assert espn["PTS"] == 26.0
+    blend = stat_line(one(), "blend").iloc[0]
+    for few in (one(**season_cols(games=2.0)), one(**season_cols("T_", 2.0)), one()):
+        out = stat_line(few, "season").iloc[0]
+        assert out["PTS"] == pytest.approx(blend["PTS"]) and out["GP"] == blend["GP"]
+
+
+def test_season_source_without_a_projection_keeps_its_own_line():
+    out = stat_line(one(stat_source=None, PTS=0.0, MIN=0.0, GP=0.0, **season_cols(games=4.0)), "season").iloc[0]
+    assert out["PTS"] == 30.0 and out["has_line"]
 
 
 def test_unknown_source_raises():

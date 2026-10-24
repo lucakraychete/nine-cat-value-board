@@ -14,7 +14,16 @@ import numpy as np
 import pandas as pd
 
 from ninecat.board import ADVANCED_METRICS, RATE_MIN_MINUTES
-from ninecat.lines import LAST_PREFIX, last_line, per36, per100, projection_line
+from ninecat.lines import (
+    ESPN_TOTAL_PREFIX,
+    LAST_PREFIX,
+    LINE_STATS,
+    SEASON_PREFIX,
+    last_line,
+    per36,
+    per100,
+    projection_line,
+)
 from ninecat.valuation import z_col
 
 POSITIONS = ["PG", "SG", "SF", "PF", "C"]
@@ -167,6 +176,9 @@ def minutes_history(row: pd.Series, seasons: dict[str, str]) -> list[tuple[str, 
         pts.append((seasons["prev"], float(row["prev_MIN"]), False))
     if pd.notna(row.get(LAST_PREFIX + "MIN")) and row.get(LAST_PREFIX + "G", 0) > 0:
         pts.append((seasons["last"], float(row[LAST_PREFIX + "MIN"]), False))
+    now = season_so_far(row)
+    if now is not None and pd.notna(now["MIN"]):
+        pts.append((f"{seasons['current']} so far", float(now["MIN"]), False))
     if pd.notna(row.get("proj_MIN")) and row["proj_MIN"] > 0:
         pts.append((f"{seasons['current']} proj", float(row["proj_MIN"]), True))
     return pts
@@ -185,18 +197,47 @@ def minutes_trend(d_min: float | None) -> str:
 def rolling_minutes(logs: pd.DataFrame, games: int = ROLLING_GAMES) -> pd.DataFrame:
     """His last `games` games with 5- and 10-game rolling average minutes."""
     g = logs.sort_values("date").tail(games).reset_index(drop=True)
-    g["r5"] = g["min"].rolling(5, min_periods=1).mean()
-    g["r10"] = g["min"].rolling(10, min_periods=1).mean()
+    g["r5"] = g["MIN"].rolling(5, min_periods=1).mean()
+    g["r10"] = g["MIN"].rolling(10, min_periods=1).mean()
     return g
+
+
+def _games(row, col: str) -> float:
+    g = pd.to_numeric(row.get(col), errors="coerce")
+    return float(g) if pd.notna(g) else 0.0
+
+
+def season_so_far(row: pd.Series) -> pd.Series | None:
+    """This season's per-game line with G (games), from any number of games.
+
+    nba.com's S_ line first, ESPN's T_ averages when the name join missed;
+    None before his first game.
+    """
+    for prefix, games in ((SEASON_PREFIX, "G"), (ESPN_TOTAL_PREFIX, "GP")):
+        if _games(row, prefix + games) > 0:
+            line = pd.Series({s: pd.to_numeric(row.get(prefix + s), errors="coerce") for s in LINE_STATS})
+            line["G"] = _games(row, prefix + games)
+            return line
+    return None
+
+
+def recent_line(row: pd.Series, prefix: str = "R15_") -> pd.Series | None:
+    """ESPN's last-15-day (or R7_/R30_) per-game line with G, or None without games."""
+    if _games(row, prefix + "GP") <= 0:
+        return None
+    line = pd.Series({s: pd.to_numeric(row.get(prefix + s), errors="coerce") for s in LINE_STATS})
+    line["G"] = _games(row, prefix + "GP")
+    return line
 
 
 def stat_lines(raw: pd.DataFrame, board_row: pd.Series, pace: dict[str, float] | None,
                labels: dict[str, str]) -> pd.DataFrame:
-    """Projection, last season, the board's line, per 36 and per 100, per game.
+    """This season, last 15 days, projection, last season, the board's line,
+    per 36 and per 100, per game, with G = the games behind each line.
 
     `raw` is the player's single-row slice of the unvalued players frame.
     """
-    cols = ["MIN", "PTS", "REB", "AST", "STL", "BLK", "3PM", "FG%", "FT%", "TO", "FGA", "FTA"]
+    cols = ["G", "MIN", "PTS", "REB", "AST", "STL", "BLK", "3PM", "FG%", "FT%", "TO", "FGA", "FTA"]
 
     def pcts(line: pd.DataFrame) -> pd.DataFrame:
         line = line.copy()
@@ -209,15 +250,25 @@ def stat_lines(raw: pd.DataFrame, board_row: pd.Series, pace: dict[str, float] |
         board_line[c] = pd.to_numeric(board_line[c], errors="coerce")
     board_line["pro_team"] = board_row.get("pro_team")
 
+    def with_games(line: pd.DataFrame, games) -> pd.DataFrame:
+        return line.assign(G=games)
+
     rows = []
+    first = raw.iloc[0]
+    for key, line in (("season", season_so_far(first)), ("recent", recent_line(first))):
+        if line is not None and key in labels:
+            rows.append((labels[key], line.to_frame().T.astype(float)))
     has_proj = "stat_source" in raw and raw["stat_source"].notna().iloc[0]
     if has_proj:
-        rows.append((labels["proj"], projection_line(raw)))
+        proj = projection_line(raw)
+        rows.append((labels["proj"], with_games(proj, proj["GP"])))
     if raw.get(LAST_PREFIX + "G", pd.Series([0])).fillna(0).iloc[0] > 0:
-        rows.append((labels["last"], last_line(raw)))
-    rows.append((labels["board"], board_line))
+        last = last_line(raw)
+        rows.append((labels["last"], with_games(last, last["GP"])))
+    rows.append((labels["board"], with_games(board_line, pd.to_numeric(board_line.get("GP"), errors="coerce"))))
     if board_line["MIN"].iloc[0] >= RATE_MIN_MINUTES:
-        rows.append(("Per 36 minutes", per36(board_line)))
-        rows.append((labels["per100"], per100(board_line, pace)))
+        rows.append(("Per 36 minutes", with_games(per36(board_line), np.nan)))
+        rows.append((labels["per100"], with_games(per100(board_line, pace), np.nan)))
     out = pd.concat([pcts(line)[cols].assign(Line=label) for label, line in rows], ignore_index=True)
+    out[cols] = out[cols].astype(float)
     return out[["Line", *cols]]

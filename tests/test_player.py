@@ -16,6 +16,7 @@ from ninecat.player import (
     primary_position,
     rate_items,
     rolling_minutes,
+    season_so_far,
     stat_lines,
 )
 
@@ -83,20 +84,24 @@ def test_comparables_are_nearest_in_value_at_position(board):
 
 
 def test_minutes_history_and_trend(board):
-    row = board[board["prev_MIN"].notna()].iloc[0]
+    row = board[board["prev_MIN"].notna() & board["S_G"].isna()].iloc[0]
     hist = minutes_history(row, SEASONS)
     assert [h[0] for h in hist] == ["2024-25", "2025-26", "2026-27 proj"]
     assert hist[-1][2] and not hist[0][2]
+    now = board[board["prev_MIN"].notna() & (board["S_G"] > 0)].iloc[0]
+    hist = minutes_history(now, SEASONS)
+    assert [h[0] for h in hist] == ["2024-25", "2025-26", "2026-27 so far", "2026-27 proj"]
+    assert hist[2][1] == pytest.approx(now["S_MIN"]) and not hist[2][2]
     assert "more minutes" in minutes_trend(3.0) and "fewer" in minutes_trend(-2.5)
     assert "same" in minutes_trend(0.5) and "No prior" in minutes_trend(np.nan)
 
 
 def test_rolling_minutes_window():
-    logs = pd.DataFrame({"date": [f"2026-01-{d:02d}" for d in range(30, 0, -1)], "min": range(30)})
+    logs = pd.DataFrame({"date": [f"2026-01-{d:02d}" for d in range(30, 0, -1)], "MIN": range(30)})
     g = rolling_minutes(logs, games=12)
     assert len(g) == 12 and g["date"].is_monotonic_increasing
-    assert g["r5"].iloc[-1] == pytest.approx(np.mean(g["min"].iloc[-5:]))
-    assert g["r10"].iloc[0] == g["min"].iloc[0]
+    assert g["r5"].iloc[-1] == pytest.approx(np.mean(g["MIN"].iloc[-5:]))
+    assert g["r10"].iloc[0] == g["MIN"].iloc[0]
 
 
 def test_stat_lines(players, board):
@@ -107,6 +112,28 @@ def test_stat_lines(players, board):
     assert lines["Line"].tolist() == ["proj", "last", "board", "Per 36 minutes", "per100"]
     assert lines.loc[3, "PTS"] == pytest.approx(row["PTS"] * 36 / row["MIN"])
     assert lines.loc[2, "FG%"] == pytest.approx(row["FGM"] / row["FGA"])
+    assert lines.loc[0, "G"] == row["GP"] and np.isnan(lines.loc[3, "G"])
+
+
+def test_stat_lines_add_this_season_and_last_15_days(players, board):
+    idx = board.index[(board["MIN"] >= 15) & (board["S_G"] > 0)][0]
+    row = board.loc[idx]
+    raw = players[players["player_id"] == row["player_id"]].assign(R15_GP=3.0, **{f"R15_{s}": 2.0 for s in (
+        "MIN", "PTS", "REB", "AST", "STL", "BLK", "3PM", "TO", "FGM", "FGA", "FTM", "FTA")})
+    labels = {**LABELS, "season": "season", "recent": "l15"}
+    lines = stat_lines(raw, row, {"DEN": 100.0}, labels).set_index("Line")
+    assert lines.index[:3].tolist() == ["season", "l15", "proj"]
+    assert lines.loc["season", "PTS"] == pytest.approx(raw["S_PTS"].iloc[0])
+    assert lines.loc["season", "G"] == raw["S_G"].iloc[0]
+    assert lines.loc["season", "FG%"] == pytest.approx(raw["S_FGM"].iloc[0] / raw["S_FGA"].iloc[0])
+    assert (lines.loc["l15", "G"], lines.loc["l15", "FT%"]) == (3.0, 1.0)
+
+
+def test_season_so_far_falls_back_to_espn_and_waits_for_a_game():
+    row = pd.Series({"S_G": np.nan, "T_GP": 2.0, "T_PTS": 21.0, "T_MIN": 30.0})
+    now = season_so_far(row)
+    assert (now["PTS"], now["G"]) == (21.0, 2.0)
+    assert season_so_far(pd.Series({"S_G": 0.0, "T_GP": np.nan})) is None
 
 
 def test_pct3_formats_like_a_box_score():
