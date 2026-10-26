@@ -44,6 +44,9 @@ ninecat/league.py      team category totals, build_league(): rosters, worth to e
 ninecat/player.py      player-page numbers: percentiles, position ranks, comparables
 ninecat/charts.py      plotly figures for the player page (pure, no Streamlit)
 ninecat/urlstate.py    query-parameter names for every setting, player_href(), link_target()
+ninecat/overview.py    Players Overview: category wins added (CWA) pre / so far / ROS (interim
+                       ros_line(), replaced by the ML model in Part 5), preseason snapshot
+                       choice, recent minutes, per-game values, this/next week and playoff windows
 ninecat/theme.py       design tokens (light/dark), z-score heat colors, app CSS
 app.py                 Streamlit entry: header, status line, controls, tabs, routing;
                        renders from the cache only
@@ -79,7 +82,7 @@ and this season by `name_key`) -> `build_board()` (`stat_line()` then `value_pla
 `data/` files:
 - `players.csv`, one row per player: identity, `fantasy_team` ("FA" for free agents),
   `team_id`, `stat_source` ("projected" or "total"), `ADP` (blank = undrafted),
-  `injury_status`, `injured`, `return_date`, per-game MIN/PTS/REB/AST/STL/BLK/3PM/TO/
+  `injury_status`, `injured`, `return_date`, `pct_rostered` (ESPN-wide), per-game MIN/PTS/REB/AST/STL/BLK/3PM/TO/
   FGM/FGA/FTM/FTA and projected `GP` (the projection), then ESPN's season-to-date
   `T_*` (+ `T_GP`, `T_GS`) and last 7/15/30-day `R7_*`, `R15_*`, `R30_*` averages.
 - `last_season.csv`: `L_*` per-game, `L_G`, `prev_MIN`, `adv_*` rates (weekly).
@@ -93,6 +96,7 @@ and this season by `name_key`) -> `build_board()` (`stat_line()` then `value_pla
 - `transactions.csv`: msg_id, date (UTC), team_id, action (FA add / Waiver add /
   Drop / Trade), player_id, player, from_team_id (trades), msg_type. Append-only, deduped.
 - `snapshots/espn_proj_YYYY-MM-DD.csv`: the day's ESPN projections (last refresh wins).
+  The earliest on or before opening night is the Overview's preseason line.
 - `history/logs_<season>.csv.gz`, `totals_<season>.csv.gz`: 2017-18 to last season.
 - `meta.json`: league, teams, `current_period`, `regular_periods`, `season_start`,
   `calendar_note`, and `sources` = {key: {"status", "updated"}} where `updated` is the

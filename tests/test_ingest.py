@@ -252,3 +252,18 @@ def test_ingest_history_skips_cached_seasons(tmp_path, monkeypatch):
     assert status["2017-18"] == "cached" and "2017-18" not in fetched
     assert status["2019-20"].startswith("failed") and status["2020-21"].startswith("ok")
     assert ingest.history_paths(tmp_path, "2025-26")[0].exists()
+
+
+def test_rostered_comes_from_the_raw_ownership_block():
+    feed = [{"player": {"id": 1, "ownership": {"percentOwned": 99.87, "averageDraftPosition": 2.0}}},
+            {"player": {"id": 2, "ownership": {}}}, {"id": 3, "ownership": {"percentOwned": 0.0}}]
+    assert ingest.rostered_from_players(feed) == {1: 99.9, 3: 0.0}
+
+
+def test_snapshot_days_and_loading(tmp_path):
+    for day in (date(2026, 10, 23), date(2026, 10, 18)):
+        ingest.write_csv(pd.DataFrame({"player_id": [1], "PTS": [day.day]}), ingest.snapshot_path(tmp_path, day))
+    (tmp_path / ingest.SNAPSHOT_DIR / "espn_proj_notadate.csv").write_text("x")
+    assert ingest.snapshot_days(tmp_path) == [date(2026, 10, 18), date(2026, 10, 23)]
+    assert ingest.load_snapshot(date(2026, 10, 18), tmp_path)["PTS"].tolist() == [18]
+    assert ingest.load_snapshot(None, tmp_path) is None and ingest.load_snapshot(date(2026, 1, 1), tmp_path) is None

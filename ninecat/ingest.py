@@ -73,7 +73,7 @@ SPLIT_PREFIXES = {"total": ESPN_TOTAL_PREFIX, "last_7": "R7_", "last_15": "R15_"
 # Every source the status line reports, in display order.
 SOURCE_LABELS = {
     "espn": "ESPN rosters and projections",
-    "espn_adp": "ESPN draft position",
+    "espn_adp": "ESPN draft position and % rostered",
     "espn_transactions": "ESPN league transactions",
     "espn_matchup": "ESPN live matchups",
     "espn_league_schedule": "ESPN matchup schedule",
@@ -232,7 +232,7 @@ def split_stats(player, year: int) -> dict:
 
 
 def player_row(player, year: int, fantasy_team: str, team_id: int | None,
-               adp: dict[int, float] | None = None) -> dict:
+               adp: dict[int, float] | None = None, rostered: dict[int, float] | None = None) -> dict:
     stats, source = _per_game_stats(player, year)
     back = getattr(player, "expected_return_date", None)
     return {
@@ -250,6 +250,7 @@ def player_row(player, year: int, fantasy_team: str, team_id: int | None,
         "team_id": team_id,
         "stat_source": source,
         "ADP": (adp or {}).get(player.playerId),
+        "pct_rostered": (rostered or {}).get(player.playerId),
         **stats,
         **split_stats(player, year),
     }
@@ -282,8 +283,24 @@ def adp_from_players(players: list[dict]) -> dict[int, float]:
     return out
 
 
-def fetch_adp(league, size: int = 1000) -> dict[int, float]:
-    """ESPN's ADP across all its leagues, from the same player feed free_agents uses."""
+def rostered_from_players(players: list[dict]) -> dict[int, float]:
+    """ESPN's percent rostered across all its leagues, by player id.
+
+    espn-api's Player doesn't keep it, so it comes from the raw feed's
+    ownership.percentOwned, the same block ADP comes from.
+    """
+    out = {}
+    for entry in players:
+        player = entry.get("player", entry)
+        pct = (player.get("ownership") or {}).get("percentOwned")
+        if pct is not None:
+            out[int(player["id"])] = round(float(pct), 1)
+    return out
+
+
+def fetch_player_feed(league, size: int = 1000) -> list[dict]:
+    """ESPN's top players by draft rank with their ownership block (ADP, % rostered),
+    from the same player feed free_agents uses."""
     filters = {"players": {
         "limit": size,
         "sortDraftRanks": {"sortPriority": 100, "sortAsc": True, "value": "STANDARD"},
@@ -292,17 +309,18 @@ def fetch_adp(league, size: int = 1000) -> dict[int, float]:
         params={"view": "kona_player_info", "scoringPeriodId": league.current_week},
         headers={"x-fantasy-filter": json.dumps(filters)},
     )
-    return adp_from_players(data.get("players", []))
+    return data.get("players", [])
 
 
 def build_players_frame(league, year: int, free_agent_count: int = 300,
-                        adp: dict[int, float] | None = None) -> pd.DataFrame:
+                        adp: dict[int, float] | None = None,
+                        rostered: dict[int, float] | None = None) -> pd.DataFrame:
     rows = []
     for team in league.teams:
         for player in team.roster:
-            rows.append(player_row(player, year, team.team_name, team.team_id, adp))
+            rows.append(player_row(player, year, team.team_name, team.team_id, adp, rostered))
     for player in league.free_agents(size=free_agent_count):
-        rows.append(player_row(player, year, FREE_AGENT, None, adp))
+        rows.append(player_row(player, year, FREE_AGENT, None, adp, rostered))
 
     df = pd.DataFrame(rows).drop_duplicates(subset="player_id", keep="first")
     df["team_id"] = df["team_id"].astype("Int64")
@@ -625,8 +643,9 @@ def ingest(
 
     league = fetch_league(settings)
     status: dict[str, str] = {}
-    adp = attempt(status, "espn_adp", lambda: fetch_adp(league)) or {}
-    df = build_players_frame(league, settings.year, free_agent_count, adp)
+    feed = attempt(status, "espn_adp", lambda: fetch_player_feed(league)) or []
+    df = build_players_frame(league, settings.year, free_agent_count,
+                             adp_from_players(feed), rostered_from_players(feed))
     status["espn"] = "ok"
     write_csv(df, data_dir / PLAYERS_FILE)
     write_csv(projection_snapshot(df), snapshot_path(data_dir, now.astimezone().date()))
@@ -698,6 +717,22 @@ def load_table(name: str, data_dir: Path = DATA_DIR) -> pd.DataFrame:
     """Any other cached table (schedule, league_schedule, live_matchup, transactions); empty if missing."""
     path = data_dir / name
     return pd.read_csv(path) if path.exists() else pd.DataFrame()
+
+
+def snapshot_days(data_dir: Path = DATA_DIR) -> list[date]:
+    """Days with a saved ESPN projection snapshot, oldest first."""
+    days = []
+    for path in (data_dir / SNAPSHOT_DIR).glob("espn_proj_*.csv"):
+        try:
+            days.append(date.fromisoformat(path.stem.removeprefix("espn_proj_")))
+        except ValueError:
+            continue
+    return sorted(days)
+
+
+def load_snapshot(day: date | None, data_dir: Path = DATA_DIR) -> pd.DataFrame | None:
+    path = snapshot_path(data_dir, day) if day else None
+    return pd.read_csv(path) if path is not None and path.exists() else None
 
 
 def main() -> None:

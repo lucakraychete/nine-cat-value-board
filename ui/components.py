@@ -49,16 +49,23 @@ def legend(items: list[tuple[str, str]]) -> None:
         f'<span><i style="background:{c}"></i>{escape(label)}</span>' for c, label in items) + "</div>")
 
 
+INJURY_TAGS = {"OUT": ("out", "OUT"), "DAY_TO_DAY": ("dtd", "DTD")}
+
+
 def tags(row: pd.Series) -> str:
     t = ""
-    inj = row.get("injury_status")
-    if inj == "OUT":
-        t += '<span class="tag out">OUT</span>'
-    elif inj == "DAY_TO_DAY":
-        t += '<span class="tag dtd">DTD</span>'
+    inj = INJURY_TAGS.get(row.get("injury_status"))
+    if inj:
+        t += f'<span class="tag {inj[0]}">{inj[1]}</span>'
     if not (row.get("L_G", 0) or 0) > 0:
         t += '<span class="tag new" title="No NBA stats last season: rookie or missed the season">PROJ ONLY</span>'
     return t
+
+
+def name_with_tag(row: pd.Series) -> str:
+    """His name with the injury tag in plain text, for table cells."""
+    inj = INJURY_TAGS.get(row.get("injury_status"))
+    return f"{row['name']} · {inj[1]}" if inj else str(row["name"])
 
 
 def fmt_num(x, digits: int = 1) -> str:
@@ -245,6 +252,147 @@ def advanced_table(board: pd.DataFrame, my_team: str | None, abbrevs: dict[str, 
     }
     for m in ADVANCED_METRICS:
         config[m.label] = st.column_config.NumberColumn(width=58, help=m.help)
+    return styler, config
+
+
+def _base_frame(board: pd.DataFrame, abbrevs: dict[str, str], tagged: bool = False) -> pd.DataFrame:
+    return pd.DataFrame({
+        "Player": [name_with_tag(r) for _, r in board.iterrows()] if tagged else board["name"].values,
+        "Pos": board["eligible"].fillna(board.get("position", "")).values,
+        "NBA": board["pro_team"].values,
+        "Owner": owner_labels(board, abbrevs).values,
+    })
+
+
+def _base_config() -> dict:
+    return {"Player": st.column_config.TextColumn(width="medium", pinned=True),
+            "Pos": st.column_config.TextColumn(width=62),
+            "NBA": st.column_config.TextColumn(width=48),
+            "Owner": st.column_config.TextColumn(width=62)}
+
+
+def season_minutes(board: pd.DataFrame) -> pd.Series:
+    """Minutes per game this season: nba.com's, else ESPN's."""
+    nba = pd.to_numeric(board.get("S_MIN"), errors="coerce")
+    espn = pd.to_numeric(board.get("T_MIN"), errors="coerce")
+    if nba is None:
+        return espn if espn is not None else pd.Series(np.nan, index=board.index)
+    return nba.where(nba.notna(), espn) if espn is not None else nba
+
+
+def overview_table(board: pd.DataFrame, ov: pd.DataFrame, cats: list[str], punt: list[str], my_team: str | None,
+                   abbrevs: dict[str, str], mode: str, min_l14: pd.Series, pre_day: str):
+    """Pre, so far and ROS category wins added, with ranks, and the so-far per category.
+
+    `ov` is overview() for these board rows; min_l14 is aligned to them too.
+    Returns (styler, column_config).
+    """
+    labels = {c: f"{c} (punt)" if c in punt else c for c in cats}
+    frame = _base_frame(board, abbrevs, tagged=True)
+    frame["GP"] = ov["gp"].values
+    frame["Min"] = season_minutes(board).values
+    frame["Min L14"] = min_l14.values
+    for col, src in (("So far", "so_far"), ("So far Rk", "so_far_rank"), ("Pre", "pre"), ("Pre Rk", "pre_rank"),
+                     ("Rk Δ", "rank_delta"), ("ROS", "ros"), ("ROS Rk", "ros_rank")):
+        frame[col] = pd.to_numeric(ov[src], errors="coerce").astype(float).values
+    for c in cats:
+        frame[labels[c]] = ov[f"sf_{c}"].values
+
+    t = tokens(mode)
+    css = pd.DataFrame("", index=frame.index, columns=frame.columns)
+    css["Player"] = link_style(t)
+    css["So far"] = "font-weight: 700"
+    # Shade per-category so far against the board's bigger contributions, so
+    # the colors mean something on day 5 as well as day 150.
+    scored = [c for c in cats if c not in punt]
+    vals = np.abs(ov[[f"sf_{c}" for c in scored]].to_numpy(float)) if scored else np.zeros(1)
+    top = float(np.nanquantile(vals, 0.95)) if np.isfinite(vals).any() else 0.0
+    scale = 2.5 / top if top > 0 else 1.0
+    for c in cats:
+        if c in punt:
+            css[labels[c]] = f"color: {t['muted']}"
+        else:
+            css[labels[c]] = [heat(v * scale, mode) for v in ov[f"sf_{c}"].values]
+
+    formats = {"GP": "{:.0f}", "Min": "{:.1f}", "Min L14": "{:.1f}", "So far": "{:+.2f}", "So far Rk": "{:.0f}",
+               "Pre": "{:+.1f}", "Pre Rk": "{:.0f}", "Rk Δ": "{:+.0f}", "ROS": "{:+.1f}", "ROS Rk": "{:.0f}",
+               **{labels[c]: "{:+.1f}" for c in cats}}
+    mine = board["fantasy_team"].eq(my_team) if my_team else pd.Series(False, index=board.index)
+    styler = _style(frame, css, formats, mine, mode)
+
+    as_of = f" (ESPN's projection as of {pre_day})" if pre_day else ""
+    config = {
+        **_base_config(),
+        "GP": st.column_config.NumberColumn(width=44, help="Games he has played this season"),
+        "Min": st.column_config.NumberColumn(width=50, help="Minutes per game this season"),
+        "Min L14": st.column_config.NumberColumn(
+            width=62, help="Minutes per game over the last 14 days, from nba.com game logs (blank: no games)"),
+        "So far": st.column_config.NumberColumn(
+            width=64, help="Category wins added so far = his full-season league impact at this season's per-game "
+                           "rates (no games discount) × games played ÷ season games"),
+        "So far Rk": st.column_config.NumberColumn(width=70, help="Rank by So far among every player on the board"),
+        "Pre": st.column_config.NumberColumn(
+            width=58, help=f"Category wins added over a full season on the preseason ESPN projection{as_of}"),
+        "Pre Rk": st.column_config.NumberColumn(width=58, help="Rank by Pre among every player on the board"),
+        "Rk Δ": st.column_config.NumberColumn(width=52, help="Pre Rk minus So far Rk"),
+        "ROS": st.column_config.NumberColumn(
+            width=58, help="ROS (interim): category wins added over his team's remaining games on a blend of this "
+                           "season and the preseason projection, weighted GP ÷ (GP + 20); the ML projection replaces it"),
+        "ROS Rk": st.column_config.NumberColumn(width=62, help="Rank by ROS among every player on the board"),
+    }
+    for c in cats:
+        config[labels[c]] = st.column_config.NumberColumn(
+            width=62, help=f"{c} category wins added so far" + (" (punted: not in the totals)" if c in punt else ""))
+    return styler, config
+
+
+def schedule_table(board: pd.DataFrame, info: pd.DataFrame, my_team: str | None, abbrevs: dict[str, str],
+                   mode: str, labels: dict[str, str]):
+    """Games ahead, recent role and the last 10 games' value for these board rows.
+
+    `info` is aligned to board and holds: week, next, playoffs, started,
+    min_l7, min_l14, rostered, spark. labels carry the week date ranges.
+    """
+    frame = _base_frame(board, abbrevs)
+    frame["Status"] = board.get("injury_status", pd.Series("", index=board.index)).fillna("ACTIVE").map(
+        {"ACTIVE": "Active", "OUT": "Out", "DAY_TO_DAY": "Day to day", "SUSPENSION": "Suspended"}).fillna(
+        board.get("injury_status", pd.Series("", index=board.index)).astype(str).str.title()).values
+    frame["This wk"] = info["week"].values
+    frame["Next wk"] = info["next"].values
+    frame["Playoffs"] = info["playoffs"].values
+    frame["Started"] = info["started"].values
+    frame["Min"] = season_minutes(board).values
+    frame["Min L7"] = info["min_l7"].values
+    frame["Min L14"] = info["min_l14"].values
+    frame["% Rost"] = info["rostered"].values
+    frame["Last 10"] = info["spark"].values
+
+    t = tokens(mode)
+    css = pd.DataFrame("", index=frame.index, columns=frame.columns)
+    css["Player"] = link_style(t)
+    css["Status"] = np.where(frame["Status"] == "Out", f"color: {t['bad']}; font-weight: 600", "")
+    formats = {"This wk": "{:.0f}", "Next wk": "{:.0f}", "Playoffs": "{:.0f}", "Min": "{:.1f}", "Min L7": "{:.1f}",
+               "Min L14": "{:.1f}", "% Rost": "{:.0f}%"}
+    mine = board["fantasy_team"].eq(my_team) if my_team else pd.Series(False, index=board.index)
+    styler = _style(frame, css, formats, mine, mode)
+    config = {
+        **_base_config(),
+        "Status": st.column_config.TextColumn(width=82, help="ESPN injury status"),
+        "This wk": st.column_config.NumberColumn(width=60, help=f"His NBA team's games {labels['week']}"),
+        "Next wk": st.column_config.NumberColumn(width=62, help=f"His NBA team's games {labels['next']}"),
+        "Playoffs": st.column_config.NumberColumn(
+            width=64, help=f"His NBA team's games in your fantasy playoffs ({labels['playoffs']})"),
+        "Started": st.column_config.TextColumn(
+            width=64, help="Games started of games played this season, from ESPN's season totals "
+                           "(nba.com's game logs don't record starts)"),
+        "Min": st.column_config.NumberColumn(width=50, help="Minutes per game this season"),
+        "Min L7": st.column_config.NumberColumn(width=56, help="Minutes per game over the last 7 days (nba.com)"),
+        "Min L14": st.column_config.NumberColumn(width=62, help="Minutes per game over the last 14 days (nba.com)"),
+        "% Rost": st.column_config.NumberColumn(width=60, help="Share of ESPN leagues that roster him"),
+        "Last 10": st.column_config.LineChartColumn(
+            width="medium", help="Value of each of his last 10 games: the sum of category z-scores against "
+                                 "the board's pool, oldest to newest"),
+    }
     return styler, config
 
 

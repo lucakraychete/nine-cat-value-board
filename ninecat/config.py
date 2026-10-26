@@ -29,6 +29,10 @@ RAW_STATS = ["PTS", "REB", "AST", "STL", "BLK", "3PM", "TO", "FGM", "FGA", "FTM"
 DEFAULT_POOL_SIZE = 130
 SEASON_GAMES = 82
 
+# Interim rest-of-season line: this season's per-game weighted GP / (GP + K)
+# against the preseason projection, so after K games it counts half.
+ROS_PRIOR_GAMES = 20
+
 # Model history: regular seasons from 2017-18 through last season.
 HISTORY_FIRST_SEASON_START = 2017
 # The NBA schedule and last season's nba.com numbers barely change, so

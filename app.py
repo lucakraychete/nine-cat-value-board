@@ -9,17 +9,38 @@ rendering never waits on ESPN or nba.com.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from html import escape
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
 from ninecat.board import ADVANCED_METRICS, build_board, player_key
-from ninecat.config import DEFAULT_POOL_SIZE, SEASON_GAMES, categories, load_settings
-from ninecat.ingest import FREE_AGENT, load_cached, load_game_logs, load_meta, source_rows
-from ninecat.lines import SOURCES
+from ninecat.config import DEFAULT_POOL_SIZE, ROS_PRIOR_GAMES, SEASON_GAMES, categories, load_settings
+from ninecat.ingest import (
+    FREE_AGENT,
+    LEAGUE_SCHEDULE_FILE,
+    SCHEDULE_FILE,
+    load_cached,
+    load_game_logs,
+    load_meta,
+    load_snapshot,
+    load_table,
+    snapshot_days,
+    source_rows,
+)
+from ninecat.lines import SOURCES, name_key
 from ninecat.nbastats import season_label
+from ninecat.overview import (
+    game_values,
+    overview,
+    playoff_windows,
+    preseason_snapshot,
+    recent_minutes,
+    week_windows,
+)
+from ninecat.schedule import games_between, remaining_games
 from ninecat.theme import app_css, tokens
 from ninecat.league import build_league
 from ninecat.urlstate import PARAMS as P
@@ -29,6 +50,8 @@ from ui.components import (
     advanced_table,
     category_table,
     html,
+    overview_table,
+    schedule_table,
     show_table,
     theme_mode,
 )
@@ -62,6 +85,28 @@ def cached_board(players, cats, punt, source, games_discount, pool_size, season_
 def cached_league(_board, key, cats, teams, season_games):
     """The league model for one board; `key` stands in for hashing the board."""
     return build_league(_board, cats, teams, season_games=season_games)
+
+
+@st.cache_data(show_spinner=False)
+def cached_schedules():
+    """The NBA schedule, the league's matchup periods, and the snapshot days on disk."""
+    return load_table(SCHEDULE_FILE), load_table(LEAGUE_SCHEDULE_FILE), snapshot_days()
+
+
+@st.cache_data(show_spinner="Adding up category wins: preseason, so far, rest of season...")
+def cached_overview(_players, _board, key, cats, teams, punt, pool_size, season_games, games_discount,
+                    pre_day, today):
+    """overview() for one board; `key` (the league key) stands in for hashing the frames."""
+    schedule = cached_schedules()[0]
+    remaining = remaining_games(schedule, today).to_dict() if not schedule.empty else None
+    return overview(_players, _board, cats, teams, punt=punt, pool_size=pool_size, season_games=season_games,
+                    games_discount=games_discount, preseason=load_snapshot(pre_day), remaining=remaining)
+
+
+@st.cache_data(show_spinner=False)
+def cached_game_values(_board, key, cats, punt, season):
+    logs = cached_logs()
+    return game_values(logs[logs["season"] == season], _board, cats, punt)
 
 
 def when(iso: str | None) -> str:
@@ -263,18 +308,66 @@ if pid:
     player_page.render(board, players, pid, ctx, open_player)
     st.stop()
 
+# ---------------------------------------------------------------- players tab inputs
+COLUMN_VIEWS = ["Overview", "Categories", "Advanced", "Schedule & role"]
+TODAY = date.today()
+SCHEDULE, LEAGUE_SCHEDULE, SNAP_DAYS = cached_schedules()
+opening = (date.fromisoformat(meta["season_start"]) if meta.get("season_start")
+           else pd.Timestamp(SCHEDULE["date"].min()).date() if not SCHEDULE.empty else None)
+PRESEASON = preseason_snapshot(SNAP_DAYS, opening)
+current_logs = cached_logs()
+current_logs = current_logs[current_logs["season"] == seasons["current"]]
+MIN_L14 = recent_minutes(current_logs, TODAY, 14)
+
+
+def span(a: date, b: date) -> str:
+    return f"{a:%b} {a.day}–{b:%b} {b.day}" if a.month != b.month else f"{a:%b} {a.day}–{b.day}"
+
+
+THIS_WEEK, NEXT_WEEK = week_windows(LEAGUE_SCHEDULE, meta.get("current_period"), TODAY)
+PLAYOFFS = playoff_windows(LEAGUE_SCHEDULE)
+WEEK_LABELS = {"week": span(*THIS_WEEK), "next": span(*NEXT_WEEK),
+               "playoffs": ", ".join(span(*w) for w in PLAYOFFS) or "not set yet"}
+
+
+def numeric(view: pd.DataFrame, col: str) -> pd.Series:
+    """A numeric column, or NaN for everyone when the cache doesn't have it yet."""
+    return pd.to_numeric(view[col], errors="coerce") if col in view else pd.Series(np.nan, index=view.index)
+
+
+def schedule_info(view: pd.DataFrame) -> pd.DataFrame:
+    """Games ahead, starts, recent minutes, % rostered and the last-10 sparkline for these rows."""
+    team = view["pro_team"]
+
+    def games(a, b):
+        if SCHEDULE.empty:
+            return pd.Series(np.nan, index=view.index)
+        return team.map(games_between(SCHEDULE, a, b)).fillna(0)
+
+    playoffs = sum((games(a, b) for a, b in PLAYOFFS), pd.Series(0.0, index=view.index)) if PLAYOFFS else np.nan
+    gs, gp = numeric(view, "T_GS"), numeric(view, "T_GP")
+    started = [f"{int(s)}/{int(g)}" if pd.notna(s) and pd.notna(g) and g > 0 else "–" for s, g in zip(gs, gp)]
+    keys = view["name"].map(name_key)
+    spark = cached_game_values(board, league_key, tuple(cats), tuple(punt), seasons["current"])
+    return pd.DataFrame({
+        "week": games(*THIS_WEEK), "next": games(*NEXT_WEEK), "playoffs": playoffs, "started": started,
+        "min_l7": numeric(view, "S_MIN_7D"), "min_l14": keys.map(MIN_L14),
+        "rostered": numeric(view, "pct_rostered"), "spark": [spark.get(k, []) for k in keys],
+    }, index=view.index)
+
+
 # ---------------------------------------------------------------- tabs
 tab_players, tab_team, tab_fa, tab_cats = st.tabs(TABS, key=P["tab"], **URL)
 
 with tab_players:
-    f1, f2, f3, f4 = st.columns([1.6, 1.2, 0.9, 1.1], vertical_alignment="bottom")
+    f1, f2, f3, f4 = st.columns([1.3, 1.0, 0.8, 2.0], vertical_alignment="bottom")
     search = f1.text_input("Search", placeholder="Search players", label_visibility="collapsed",
                            key=P["search"], **URL)
     owner = f2.selectbox("Owner", ["All players", "Free agents", "Rostered", *team_names],
                          label_visibility="collapsed", key=P["owner"], **URL)
     position = f3.selectbox("Position", ["All positions", "PG", "SG", "SF", "PF", "C"],
                             label_visibility="collapsed", key=P["position"], **URL)
-    cols = f4.segmented_control("Columns", ["Categories", "Advanced"], default="Categories", required=True,
+    cols = f4.segmented_control("Columns", COLUMN_VIEWS, default=COLUMN_VIEWS[0], required=True,
                                 label_visibility="collapsed", key=P["columns"], **URL)
 
     view = board
@@ -291,6 +384,31 @@ with tab_players:
 
     if view.empty:
         st.info("No players match those filters.")
+    elif cols == "Overview":
+        ov = cached_overview(players, board, league_key, tuple(cats), tuple(team_names), tuple(punt),
+                             int(pool_size), int(season_games), games_discount, PRESEASON.day, TODAY)
+        ov = ov.loc[view.index].sort_values("so_far", ascending=False, kind="stable")
+        view = view.loc[ov.index]
+        styler, config = overview_table(view, ov, cats, punt, my_team, abbrevs, MODE,
+                                        view["name"].map(name_key).map(MIN_L14),
+                                        f"{PRESEASON.day:%b %d}" if PRESEASON.day and not PRESEASON.before_opening
+                                        else "")
+        open_player(show_table(styler, config, key=f"tbl_ov_{ctx['epoch']}", links=links(view), height=640))
+        pre_note = (f"Pre is ESPN's preseason projection ({PRESEASON.day:%b %d}, before opening night)"
+                    if PRESEASON.before_opening else
+                    f"Pre is ESPN's earliest saved projection ({PRESEASON.day:%b %d}, after opening night)"
+                    if PRESEASON.day else "Pre needs a saved ESPN projection snapshot (none yet)")
+        html(f'<p class="note">CWA is category wins added: the extra head-to-head category wins over a season '
+             f'that the average team in your league would get from him. So far = games played × his per-game '
+             f'rate. {pre_note}. ROS is interim (this season blended with the projection, weighted '
+             f'GP ÷ (GP + {ROS_PRIOR_GAMES}), over his team\'s remaining games) until the ML model replaces it. '
+             'Punted categories are greyed out and left out of the totals.</p>')
+    elif cols == "Schedule & role":
+        styler, config = schedule_table(view, schedule_info(view), my_team, abbrevs, MODE, WEEK_LABELS)
+        open_player(show_table(styler, config, key=f"tbl_sched_{ctx['epoch']}", links=links(view), height=640))
+        html(f'<p class="note">Games count his NBA team\'s schedule {WEEK_LABELS["week"]} (this week) and '
+             f'{WEEK_LABELS["next"]} (next week), and over your fantasy playoffs ({WEEK_LABELS["playoffs"]}). '
+             'Last 10 scores each game like a season line: the sum of category z-scores against the pool.</p>')
     elif cols == "Advanced":
         styler, config = advanced_table(view, my_team, abbrevs, MODE)
         open_player(show_table(styler, config, key=f"tbl_adv_{ctx['epoch']}", links=links(view), height=640))
