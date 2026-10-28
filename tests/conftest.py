@@ -64,3 +64,18 @@ def synthetic_players(n: int = 90, seed: int = 3) -> pd.DataFrame:
 @pytest.fixture
 def players() -> pd.DataFrame:
     return synthetic_players()
+
+
+def with_model(players: pd.DataFrame, scale: float = 1.1) -> pd.DataFrame:
+    """The M_ columns load_cached() attaches once a model is trained: the projection
+    scaled, availability from GP, and symmetric 80% ranges."""
+    out = players.copy()
+    for c in ["MIN", "PTS", "REB", "AST", "STL", "BLK", "3PM", "TO", "FGM", "FGA", "FTM", "FTA"]:
+        out["M_" + c] = players[c] * scale
+        out["M_lo_" + c], out["M_hi_" + c] = out["M_" + c] * 0.8, out["M_" + c] * 1.2
+    for c in ("FG%", "FT%"):
+        out["M_lo_" + c], out["M_hi_" + c] = 0.4, 0.9
+    out["M_lo_VALUE"], out["M_hi_VALUE"] = -2.0, 2.0
+    out["M_avail"] = (players["GP"] / 82).clip(upper=1)
+    out["M_GP"], out["M_G"], out["M_k"] = players["GP"], players["GP"] * 0.9, 5.0
+    return out

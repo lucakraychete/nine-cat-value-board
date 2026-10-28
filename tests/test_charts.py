@@ -54,3 +54,13 @@ def test_figures_build():
     assert figs[1].data[0].line.dash == "dash"
     # percentile bars: only the overall dots exist when position percentiles are missing
     assert len(figs[5].data) == 1 and list(figs[5].data[0].x) == [80.0, 80.0]
+
+
+def test_model_tab_charts_build():
+    from ninecat.charts import calibration_plot, coverage_bars
+    from ninecat.theme import tokens
+    t = tokens("light")
+    fig = coverage_bars(["PTS", "REB"], [0.78, 0.81], 0.8, t)
+    assert list(fig.data[0].x) == [0.78, 0.81]
+    cal = calibration_plot([0.3, 0.7], [0.25, 0.8], [10, 12], t)
+    assert list(cal.data[0].y) == [0.25, 0.8]

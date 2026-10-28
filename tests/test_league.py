@@ -180,3 +180,14 @@ def test_uncertainty(games, injury, label, spread):
     u = uncertainty(10.0, games, injury)
     assert u.label == label and u.high - 10.0 == pytest.approx(max(0.6, 10 * spread))
     assert uncertainty(0.5, 60, "ACTIVE").high == pytest.approx(1.1)  # floor of 0.6
+
+
+def test_uncertainty_uses_the_models_measured_range():
+    from ninecat.league import uncertainty
+    u = uncertainty(5.0, 70, "ACTIVE", value_range=(-1.0, 2.0), slope=1.5, games=12)
+    assert (u.low, u.high) == pytest.approx((3.5, 8.0)) and "12 games" in u.why
+    assert u.label == "wide"                                      # half-width 2.25 is 45% of 5
+    assert uncertainty(5.0, 70, None, value_range=(-0.4, 0.4), slope=1.5).label == "narrow"     # 12%
+    assert uncertainty(5.0, 70, None, value_range=(-1.0, 1.0), slope=1.5).label == "moderate"   # 30%
+    hand = uncertainty(5.0, 0, None)
+    assert hand.label == "wide" and "Projection only" in hand.why

@@ -41,7 +41,7 @@ LEAGUE_SCHEDULE = pd.DataFrame({"period": [1, 2, 20], "start": ["2026-10-20", "2
                                 "playoff": [False, False, True], "team_id": 1, "opponent_id": 2})
 
 
-def serve_synthetic(monkeypatch, players, auto_refresh: bool):
+def serve_synthetic(monkeypatch, players, auto_refresh: bool, report: dict | None = None):
     tables = {ingest.SCHEDULE_FILE: SCHEDULE, ingest.LEAGUE_SCHEDULE_FILE: LEAGUE_SCHEDULE}
     preseason = players[["player_id", "name", "PTS", "REB", "AST", "STL", "BLK", "3PM", "TO", "FGM", "FGA",
                          "FTM", "FTA", "MIN", "GP"]].iloc[:70]
@@ -54,6 +54,8 @@ def serve_synthetic(monkeypatch, players, auto_refresh: bool):
     monkeypatch.setattr(ingest, "load_table", lambda name, *a, **k: tables.get(name, pd.DataFrame()).copy())
     monkeypatch.setattr(ingest, "snapshot_days", lambda *a, **k: [date(2026, 10, 18), date(2026, 10, 23)])
     monkeypatch.setattr(ingest, "load_snapshot", lambda day, *a, **k: preseason.copy())
+    monkeypatch.setattr(ingest, "load_model_report", lambda *a, **k: dict(report or {}))
+    monkeypatch.setattr(ingest, "snapshot_files", lambda *a, **k: [])
     st.cache_resource.clear()   # a fresh "server start"
     st.cache_data.clear()       # and nothing cached from your real data/
 
@@ -108,7 +110,7 @@ def no_errors(at):
 def test_board_renders_and_controls_work(app):
     at, players = app
     no_errors(at)
-    assert [t.label for t in at.tabs] == ["Players", "My team", "Waiver wire", "Team categories"]
+    assert [t.label for t in at.tabs] == ["Players", "My team", "Waiver wire", "Trades", "Team categories", "Model"]
     assert "1 source on a saved copy" in "".join(h.value for h in at.get("html"))
     for source in ("proj", "last", "season", "blend"):
         at.segmented_control(key="source").set_value(source).run()
@@ -230,3 +232,141 @@ def test_player_page_renders(app, which):
     at.run()
     no_errors(at)
     assert len(at.get("plotly_chart")) >= 5
+
+
+# ---------------------------------------------------------------- trades
+
+def test_trades_tab_renders_calculator_finder_and_surplus(app):
+    at, players = app
+    no_errors(at)
+    text = all_text(at)
+    for marker in ("Valued on: rest of season (interim)", "Trade calculator", "Trade finder",
+                   "Who to trade, and to whom"):
+        assert marker in text, marker
+    finder = next(d.value for d in at.dataframe if "Open" in d.value.columns and "Gap" in d.value.columns)
+    assert len(finder) > 0 and (finder["You"] > 0).all()
+
+
+def test_a_bookmarked_trade_opens_in_the_calculator(monkeypatch):
+    players = synthetic_players()
+    serve_synthetic(monkeypatch, players, auto_refresh=False)
+    monkeypatch.setattr(ingest, "ingest", lambda *a, **k: None)
+    at = AppTest.from_file(APP, default_timeout=60)
+    mine, theirs = players.loc[0, "name"], players.loc[1, "name"]      # Alpha (my team) and Bravo
+    at.query_params.update({"tab": "Trades", "tp": "Bravo", "give": [mine], "get": [theirs], "veto": "6",
+                            "fm": "cat", "fcat": "REB", "f22": "true"})
+    at.run()
+    no_errors(at)
+    assert at.selectbox(key="tp").value == "Bravo"
+    assert at.multiselect(key="give").value == [mine] and at.multiselect(key="get").value == [theirs]
+    assert at.slider(key="veto").value == 6 and at.toggle(key="f22").value is True
+    text = all_text(at)
+    assert "category wins for you over the" in text and "Roster check" in text and "after the trade" in text
+
+
+def test_shop_him_fills_the_calculator(app):
+    at, players = app
+    at.session_state["pending_trade"] = {"partner": "Charlie", "give": [players.loc[0, "name"]], "get": []}
+    at.run()
+    no_errors(at)
+    assert at.selectbox(key="tp").value == "Charlie"
+    assert at.multiselect(key="give").value == [players.loc[0, "name"]] and at.multiselect(key="get").value == []
+    assert at.query_params["tab"] == "Trades"
+
+
+def test_trade_numbers_ignore_the_stats_source(app):
+    at, players = app
+
+    def finder():
+        return next(d.value for d in at.dataframe if "Open" in d.value.columns and "Gap" in d.value.columns)
+
+    before = finder()
+    at.segmented_control(key="source").set_value("last").run()
+    no_errors(at)
+    pd.testing.assert_frame_equal(before, finder())
+
+
+def test_player_page_offers_trades_for_another_teams_player(app):
+    at, players = app
+    at.query_params["player"] = str(players["player_id"].iloc[1])    # on Bravo
+    at.run()
+    no_errors(at)
+    assert f"Trades for {players.loc[1, 'name']}" in all_text(at)
+
+
+# ---------------------------------------------------------------- the rest-of-season model
+
+from tests.conftest import with_model
+
+MODELS = ["Season to date", "Last season", "Blend 60/40", "Interim (app today)", "Shrinkage", "Boosted"]
+EVAL = ["MIN", "PTS", "REB", "AST", "STL", "BLK", "3PM", "TO", "FG%", "FT%"]
+
+
+def fake_report(beats_blend: bool = True) -> dict:
+    rows = [{"model": m, "k": k, "cat": c, "mae": 1.0 + i / 10, "rmse": 1.5, "n": 400}
+            for i, m in enumerate(MODELS) for k in (3, 5, 10, 20, 40) for c in EVAL]
+    return {
+        "created": "2026-10-28T07:00:00+00:00", "chosen": "boosted", "model_beats_blend": beats_blend,
+        "seasons": {"train": ["2017-18", "2023-24"], "validate": ["2024-25"], "test": ["2025-26"]},
+        "checkpoints": {"train": 15028, "validate": 2261, "test": 2261},
+        "backtest": {"test": rows, "validate": rows},
+        "value_rank": {"test": [{"model": m, "k": k, "spearman": 0.6 + i / 50} for i, m in enumerate(MODELS)
+                                for k in (3, 5, 10, 20, 40)]},
+        "test_verdict": {"vs Blend 60/40": {"mae_change": -0.25}, "vs Interim (app today)": {"mae_change": -0.13}},
+        "eval_cats": EVAL, "k": {"PTS": {"k": 257.0, "games_at_30": 8.6}, "FT%": {"k": 78.0, "games_at_30": 27.8}},
+        "k_units": {"PTS": "minutes", "FT%": "attempts"},
+        "availability": {"k_team_games": 30.0, "newcomer": 0.8},
+        "boosting_vs_shrinkage": {"by_cat": {"PTS": {"change": -0.04, "low": -0.07, "high": -0.01}},
+                                  "overall": {"change": -0.046, "low": -0.061, "high": -0.031}},
+        "coverage_test": [{"cat": c, "k": 0, "coverage": 0.76, "n": 2000} for c in [*EVAL, "VALUE"]],
+    }
+
+
+@pytest.fixture
+def model_app(monkeypatch):
+    players = with_model(synthetic_players())
+    serve_synthetic(monkeypatch, players, auto_refresh=False, report=fake_report())
+    monkeypatch.setattr(ingest, "ingest", lambda *a, **k: None)
+    at = AppTest.from_file(APP, default_timeout=60)
+    at.run()
+    return at, players
+
+
+def test_with_a_model_it_is_the_default_source_and_ros_shows_its_range(model_app):
+    at, players = model_app
+    no_errors(at)
+    assert at.segmented_control(key="source").value == "model"
+    table = at.dataframe[0].value
+    assert "ROS 80%" in table.columns and table["ROS 80%"].str.contains(" to ").any()
+    text = all_text(at)
+    assert "rest-of-season projection" in text and "Valued on: rest of season (model)" in text
+    for marker in ("Rest-of-season model", "Backtest", "How fast each stat settles",
+                   "Did gradient boosting earn its place?", "Are the ranges honest?", "This season, as it happens"):
+        assert marker in text, marker
+    at.segmented_control(key="mk").set_value("10").run()
+    no_errors(at)
+
+
+def test_without_a_win_over_the_blend_the_blend_stays_default(monkeypatch):
+    serve_synthetic(monkeypatch, with_model(synthetic_players()), auto_refresh=False, report=fake_report(False))
+    monkeypatch.setattr(ingest, "ingest", lambda *a, **k: None)
+    at = AppTest.from_file(APP, default_timeout=60)
+    at.run()
+    no_errors(at)
+    assert at.segmented_control(key="source").value == "blend" and "Model (ROS)" in at.segmented_control(key="source").options
+
+
+def test_without_a_model_the_source_is_hidden_and_the_tab_explains(app):
+    at, players = app
+    assert "Model (ROS)" not in at.segmented_control(key="source").options
+    assert "No model trained yet" in all_text(at)
+
+
+def test_player_page_shows_the_models_rest_of_season_line(model_app):
+    at, players = model_app
+    at.query_params["player"] = str(players["player_id"].iloc[1])
+    at.run()
+    no_errors(at)
+    text = all_text(at)
+    assert "Rest of season (model)" in text and "projected games left" in text
+    assert any("80% range" in d.value.columns for d in at.dataframe)

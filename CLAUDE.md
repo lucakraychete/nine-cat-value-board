@@ -13,8 +13,11 @@ original single-page JS board (`reference/original_app.html`, gitignored, local 
 reusing its formulas: look, stats sources, advanced stats, ADP, player pages, team
 category totals, H2H matchup model, league impact, rest-of-season waivers. Part 1
 (live data layer, background refresh on boot, "This season" source) and Part 2
-(clickable names, every setting in the URL, waiver cards, build card) are in. Next:
-Part 3 (this week, schedule and playoffs).
+(clickable names, every setting in the URL, waiver cards, build card) are in, as are
+Part 6a (trades: calculator, surplus table, finder, "Trades for" on player pages) and
+Part 5 (the rest-of-season model: trained, plugged into ROS / trades / the "Model (ROS)"
+source, Model tab, live scoring; docs/MODEL.md). Next: 6b (how other managers see it:
+perceived value shown, logged offers, pooled loss aversion), then Parts 3 and 4.
 
 ## Structure
 
@@ -31,8 +34,8 @@ ninecat/nbastats.py    nba.com via nba_api (this season's box-score logs -> seas
 ninecat/schedule.py    NBA schedule helpers (games between dates, per period, remaining)
                        and the ESPN matchup-period calendar rebuilt from weeks
 ninecat/rates.py       USG/TS/AST/TRB/STL/BLK/TOV% and PER from box-score totals (BBR formulas)
-ninecat/lines.py       name_key join, stat_line() (proj / last / 60-40 blend / this season),
-                       per36, per100
+ninecat/lines.py       name_key join, stat_line() (proj / last / 60-40 blend / this season /
+                       model, the M_ columns), per36, per100
 ninecat/valuation.py   value_players(), category_zscores(), percentage_impact(),
                        games discount, iterative pool, team_profile()
 ninecat/board.py       build_board(): value on a line + per-36/per-100 values, ADP market
@@ -44,14 +47,37 @@ ninecat/league.py      team category totals, build_league(): rosters, worth to e
 ninecat/player.py      player-page numbers: percentiles, position ranks, comparables
 ninecat/charts.py      plotly figures for the player page (pure, no Streamlit)
 ninecat/urlstate.py    query-parameter names for every setting, player_href(), link_target()
-ninecat/overview.py    Players Overview: category wins added (CWA) pre / so far / ROS (interim
-                       ros_line(), replaced by the ML model in Part 5), preseason snapshot
+ninecat/overview.py    Players Overview: category wins added (CWA) pre / so far / ROS, where
+                       ros_line() is the model's line (M_ columns) with interim_ros_line() as
+                       the fallback, and ros_interval() its 80% range; preseason snapshot
                        choice, recent minutes, per-game values, this/next week and playoff windows
+ninecat/trades.py      trades, always rest of season: trade_line() (= ros_line()),
+                       weekly_games() for the season left, build_trade_model(), apply_trade()
+                       settlement, evaluate(), roster_fits(), surpluses(), perception
+                       (build_perception, Look, verdict), find_trades()
+ninecat/model/         rest-of-season model (PLAN.md Part 5, docs/MODEL.md): dataset.py
+                       (checkpoints at k games, no leakage, top-5-minutes start proxy, rates and
+                       per-game recombination), baselines.py (season to date, last season, 60/40
+                       blend, interim ros_line, stand-in preseason prior), evaluate.py (minutes-
+                       weighted MAE/RMSE), shrinkage.py (model 2: rate = (n x so far + k x prior) / (n + k)
+                       with k per stat, age curve, per-checkpoint minutes regression);
+                       boosting.py (model 3: HistGradientBoosting on model 2's residuals, kept
+                       only after a player-bootstrap win on validation; weighted fits are slow);
+                       games.py (availability shrinkage, projected games with injuries);
+                       evaluate.py also: top-200 value-rank Spearman, residual-quantile 80%
+                       intervals and coverage; train.py (fit, choose, score once on test,
+                       refit on every season -> RosModel + report); predict.py (RosModel,
+                       live_rows(), M_ columns, with_games()); live.py (snapshot scoring,
+                       matchup log, Brier, calibration); __main__.py is the CLI and the only
+                       part that reads or writes files
 ninecat/theme.py       design tokens (light/dark), z-score heat colors, app CSS
 app.py                 Streamlit entry: header, status line, controls, tabs, routing;
                        renders from the cache only
 ui/                    Streamlit rendering: tables (components.py), player_page.py,
                        league_views.py (my team, waiver wire, team categories),
+                       trade_views.py (Trades tab, My team surplus, "Trades for" on player pages),
+                       model_views.py (Model tab: backtest, k, boosting decision, coverage,
+                       live scoring and the matchup log),
                        refresh.py (background refresh job, once-per-server boot guard)
 .streamlit/config.toml theme: fonts, light and dark palettes
 tests/                 one test file per ninecat module, test_refresh.py, and test_app.py
@@ -66,7 +92,12 @@ setup.sh / setup.ps1   venv + deps + .env from .env.example (bash / Windows Powe
 ./setup.sh                       # Windows PowerShell: .\setup.ps1
 source .venv/bin/activate        # Windows Git Bash: .venv/Scripts/activate
 python -m ninecat.ingest         # needs a filled-in .env and network
-python -m ninecat.ingest --history   # past seasons for the model, once (~20 s)
+python -m ninecat.ingest --history   # past seasons (2015-16 on) for the model, once (~25 s)
+python -m ninecat.model baselines   # baseline backtest on the validation season
+python -m ninecat.model shrinkage   # fit model 2, compare with the baselines on validation
+python -m ninecat.model boosting    # model 3 vs model 2 on validation, bootstrap over players (~1 min)
+python -m ninecat.model train       # fit, score once on test, save data/models/ (~2.5 min; never at boot)
+python -m ninecat.model score       # model and ESPN snapshots vs what has happened since
 streamlit run app.py             # refreshes in the background on start (AUTO_REFRESH)
 pytest
 ```
@@ -97,7 +128,16 @@ and this season by `name_key`) -> `build_board()` (`stat_line()` then `value_pla
   Drop / Trade), player_id, player, from_team_id (trades), msg_type. Append-only, deduped.
 - `snapshots/espn_proj_YYYY-MM-DD.csv`: the day's ESPN projections (last refresh wins).
   The earliest on or before opening night is the Overview's preseason line.
-- `history/logs_<season>.csv.gz`, `totals_<season>.csv.gz`: 2017-18 to last season.
+  `snapshots/model_proj_YYYY-MM-DD.csv`: the day's model predictions, for live scoring.
+- `models/ros_model.pkl` (the trained RosModel) and `models/report.json` (backtests,
+  k, intervals, coverage, `model_beats_blend`): written only by `python -m ninecat.model train`.
+- `model_proj.csv`: each refresh's model predictions by `name_key`: per-game `M_*`,
+  `M_avail`, `M_GP` (share of games left incl. injury x 82), `M_G` (games left),
+  `M_k`, `M_lo_*`/`M_hi_*` (80% ranges; VALUE ones are offsets). Attached by load_cached().
+- `matchup_log.csv`: per period and team: the matchup model's win chance (first
+  sighting, `pre_week`), live W-L-T, `final`, `result`.
+- `history/logs_<season>.csv.gz`, `totals_<season>.csv.gz`: 2015-16 to last season
+  (the model trains from 2017-18; the two earlier seasons are priors only).
 - `meta.json`: league, teams, `current_period`, `regular_periods`, `season_start`,
   `calendar_note`, and `sources` = {key: {"status", "updated"}} where `updated` is the
   last success (`ingest.SOURCE_LABELS` lists the keys).
@@ -146,6 +186,31 @@ and this season by `name_key`) -> `build_board()` (`stat_line()` then `value_pla
 - Season numbers are over 20 weeks. Adding a player drops the team's lowest-value
   player sharing a position; losing one picks up the best free agent at it.
   League impact averages the other teams; punts don't enter the matchup model.
+
+## Trade rules (from the original; keep these invariant)
+
+- Every trade number uses `trades.trade_line()` and the season left, never the board's
+  stats source. Weekly games = 3.5 x his NBA team's remaining games / the average
+  team's; weeks = 20 x average remaining / season games. No games left adds nothing.
+- Settlement: the side getting more players drops its lowest-value players sharing a
+  position with the arrivals (never an arrival); the side getting fewer picks up the
+  best free agents at the positions it sent; no free agent goes to both sides.
+- Legal roster = someone not OUT at every position. The finder keeps deals worth more
+  than `MIN_GAIN` to me that read fair to them (`Look.score >= 0`), cost them no more
+  than the veto cap and are legal, at most `VARIETY` per incoming set.
+- Perceived value: 0.45 name + 0.35 headline (+ 0.20 positional fit), x recency;
+  name = ADP blended toward headline rank by season phase (median GP / 15); a manager
+  weighs what he gives up by lambda (1.3 by default).
+
+## Model rules (keep these invariant)
+
+- Seasons split whole: train 2017-18..2023-24, choose on 2024-25, score 2025-26 once.
+  No feature may use a game on or after the cut (test_model_dataset checks this).
+- Training never runs at boot or in the refresh; the refresh only predicts with the
+  saved model and fails soft (status "not available yet" without one).
+- Everything rest-of-season goes through `overview.ros_line()`; without a model (or for
+  a player it has no line for) that is `interim_ros_line()`.
+- "Model (ROS)" is the default source only if report.json says `model_beats_blend`.
 
 ## Conventions
 

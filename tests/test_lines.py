@@ -159,3 +159,14 @@ def test_zero_minutes_scale_to_nan_not_inf():
     line = stat_line(one(MIN=0.0), "proj")
     assert np.isnan(per36(line).iloc[0]["PTS"])
     assert np.isnan(per100(line, {}).iloc[0]["PTS"])
+
+
+def test_model_source_reads_the_model_line_and_falls_back_to_the_blend(players):
+    from tests.conftest import with_model
+    m = with_model(players)
+    m.loc[3, [c for c in m.columns if c.startswith("M_")]] = np.nan
+    line = stat_line(m, "model")
+    blend = stat_line(players, "blend")
+    assert line.loc[0, "PTS"] == pytest.approx(players.loc[0, "PTS"] * 1.1) and line.loc[0, "GP"] == m.loc[0, "M_GP"]
+    assert line.loc[3, "PTS"] == pytest.approx(blend.loc[3, "PTS"])
+    assert stat_line(players, "model")["PTS"].equals(blend["PTS"])             # no model trained: the blend

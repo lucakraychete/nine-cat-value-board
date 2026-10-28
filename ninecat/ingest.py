@@ -28,11 +28,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pickle
 import time
 from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from ninecat.config import (
@@ -59,6 +61,11 @@ LIVE_MATCHUP_FILE = "live_matchup.csv"
 TRANSACTIONS_FILE = "transactions.csv"
 SNAPSHOT_DIR = "snapshots"
 HISTORY_DIR = "history"
+MODELS_DIR = "models"
+MODEL_FILE = "ros_model.pkl"        # written by `python -m ninecat.model train`
+REPORT_FILE = "report.json"
+MODEL_PROJ_FILE = "model_proj.csv"  # the trained model's rest-of-season lines (M_ columns), each refresh
+MATCHUP_LOG_FILE = "matchup_log.csv"
 FREE_AGENT = "FA"
 # ESPN per-game stats kept per player: the valuation stats plus minutes.
 ESPN_STATS = [*RAW_STATS, "MIN"]
@@ -86,6 +93,8 @@ SOURCE_LABELS = {
     "nba_last_logs": "nba.com last season's game logs",
     "bbr_bpm": "Basketball Reference BPM",
     "nba_history": "nba.com past seasons (model)",
+    "model": "Rest-of-season model predictions",
+    "matchup_log": "Matchup model log (win chance vs results)",
 }
 
 # ESPN activity message types -> move. 188 (lineup moves) is left out.
@@ -663,6 +672,9 @@ def ingest(
         write_csv(calendar[0], data_dir / LEAGUE_SCHEDULE_FILE)
     if nba:
         status.update(ingest_nba(settings.year, data_dir, old_sources, now))
+    status["model"] = ingest_model(data_dir, settings.year, now)
+    period = int(league.currentMatchupPeriod)
+    attempt(status, "matchup_log", lambda: ingest_matchup_log(data_dir, settings, period, now))
 
     meta = {
         "league_id": settings.league_id,
@@ -682,13 +694,133 @@ def ingest(
     return df
 
 
+# ---------------------------------------------------------------- the rest-of-season model
+
+def load_ros_model(data_dir: Path = DATA_DIR):
+    """The model saved by `python -m ninecat.model train`, or None (missing, or saved by an incompatible version)."""
+    path = data_dir / MODELS_DIR / MODEL_FILE
+    if not path.exists():
+        return None
+    try:
+        with path.open("rb") as f:
+            return pickle.load(f)
+    except Exception:  # an old or broken pickle just means "no model"
+        return None
+
+
+def load_model_report(data_dir: Path = DATA_DIR) -> dict:
+    path = data_dir / MODELS_DIR / REPORT_FILE
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def model_snapshot_path(data_dir: Path, day: date) -> Path:
+    return data_dir / SNAPSHOT_DIR / f"model_proj_{day.isoformat()}.csv"
+
+
+def snapshot_files(data_dir: Path = DATA_DIR) -> list[tuple[str, date, pd.DataFrame]]:
+    """Every saved projection snapshot as (kind, day, frame), kind "espn" or "model"."""
+    out = []
+    for kind in ("espn", "model"):
+        for path in sorted((data_dir / SNAPSHOT_DIR).glob(f"{kind}_proj_*.csv")):
+            try:
+                day = date.fromisoformat(path.stem.removeprefix(f"{kind}_proj_"))
+            except ValueError:
+                continue
+            out.append((kind, day, pd.read_csv(path)))
+    return out
+
+
+def _history_logs(data_dir: Path, season: str) -> pd.DataFrame | None:
+    return _read_csv(history_paths(data_dir, season)[0])
+
+
+def model_projections(data_dir: Path, year: int, today: date, model) -> pd.DataFrame:
+    """Everyone's rest-of-season line from the saved model, with projected games left."""
+    from ninecat.lines import name_key
+    from ninecat.model.predict import live_rows, with_games
+    from ninecat.schedule import games_between, remaining_games
+
+    players = pd.read_csv(data_dir / PLAYERS_FILE)
+    logs = load_game_logs(data_dir)
+    current, last, prev = season_label(year), season_label(year, 1), season_label(year, 2)
+    cur = logs[logs["season"] == current]
+    last_logs = logs[logs["season"] == last]
+    if last_logs.empty:
+        last_logs = _history_logs(data_dir, last)
+    season = _read_csv(data_dir / SEASON_FILE)
+    ages = {}
+    if season is not None and "age" in season:
+        ages = season.dropna(subset=["age"]).set_index("name_key")["age"].to_dict()
+    keys = players["name"].map(name_key)
+    pred = model.predict(live_rows(cur, last_logs, _history_logs(data_dir, prev), ages, keys))
+
+    espn = players.assign(name_key=keys).drop_duplicates("name_key").set_index("name_key")
+    espn = espn.reindex(pred["name_key"]).reset_index(drop=True)
+    schedule = _read_csv(data_dir / SCHEDULE_FILE)
+    if schedule is None or schedule.empty:
+        return pred
+    remaining = remaining_games(schedule, today).to_dict()
+    sunday = today + timedelta(days=6 - today.weekday())
+    week = espn["pro_team"].map(games_between(schedule, today, sunday)).fillna(0)
+    back = pd.to_datetime(espn["return_date"], errors="coerce") if "return_date" in espn \
+        else pd.Series(pd.NaT, index=espn.index)
+    before = [float(games_between(schedule, today, d.date() - timedelta(days=1)).get(t, 0))
+              if pd.notna(d) and d.date() > today else np.nan for d, t in zip(back, espn["pro_team"])]
+    return with_games(pred, espn["pro_team"], remaining, espn["injury_status"].eq("OUT"),
+                      pd.Series(before, dtype=float), week)
+
+
+def ingest_model(data_dir: Path, year: int, now: datetime) -> str:
+    """Predict everyone's rest of season with the saved model: model_proj.csv and today's snapshot.
+
+    Never trains. Returns the source status ("ok", "not available yet ..." or the failure).
+    """
+    model = load_ros_model(data_dir)
+    if model is None:
+        return f"{NOT_YET} (run python -m ninecat.model train)"
+    try:
+        today = now.astimezone().date()
+        pred = model_projections(data_dir, year, today, model)
+        write_csv(pred, data_dir / MODEL_PROJ_FILE)
+        write_csv(pred, model_snapshot_path(data_dir, today))
+        return "ok"
+    except Exception as exc:  # fail soft: keep the old predictions
+        return f"failed: {type(exc).__name__}: {exc}"[:300]
+
+
+def ingest_matchup_log(data_dir: Path, settings: Settings, period: int, now: datetime) -> None:
+    """Log this period's matchup-model win chances (first sighting) and the live score."""
+    from ninecat.board import build_board
+    from ninecat.config import categories
+    from ninecat.model.live import matchup_probabilities, update_matchup_log
+
+    live = _read_csv(data_dir / LIVE_MATCHUP_FILE)
+    calendar = _read_csv(data_dir / LEAGUE_SCHEDULE_FILE)
+    old = _read_csv(data_dir / MATCHUP_LOG_FILE)
+    rows = calendar[calendar["period"] == period] if calendar is not None else pd.DataFrame()
+    start = date.fromisoformat(str(rows["start"].iloc[0])[:10]) if not rows.empty else None
+    end = date.fromisoformat(str(rows["end"].iloc[0])[:10]) if not rows.empty else None
+    probs = {}
+    seen = old is not None and not old.empty and bool((old["period"] == period).any())
+    if live is not None and not live.empty and start is not None and not seen:
+        players = load_cached(data_dir)[0]
+        cats = categories(settings.exclude_to)
+        names = players.dropna(subset=["team_id"]).groupby("team_id")["fantasy_team"].first()
+        probs = matchup_probabilities(build_board(players, cats), cats, {int(k): v for k, v in names.items()},
+                                      live, start, end, _read_csv(data_dir / SCHEDULE_FILE))
+    log = update_matchup_log(old, live if live is not None else pd.DataFrame(), probs, period, start,
+                             now.isoformat(timespec="seconds"))
+    write_csv(log, data_dir / MATCHUP_LOG_FILE)
+
+
 # ---------------------------------------------------------------- reading the cache
 
 def load_cached(data_dir: Path = DATA_DIR) -> tuple[pd.DataFrame, dict] | None:
     """Read the cache written by ingest(), or None if it doesn't exist yet.
 
     Players come back with last season's (L_*, adv_*) and this season's
-    (S_*, age) nba.com columns attached by name, and meta carries team
+    (S_*, age) nba.com columns and the model's rest-of-season line (M_*,
+    when a model has been trained) attached by name, and meta carries team
     pace under "pace" (empty if nba.com was never fetched).
     """
     players_path = data_dir / PLAYERS_FILE
@@ -696,7 +828,7 @@ def load_cached(data_dir: Path = DATA_DIR) -> tuple[pd.DataFrame, dict] | None:
         return None
     df = pd.read_csv(players_path, dtype={"team_id": "Int64"})
     meta = load_meta(data_dir)
-    for name in (LAST_SEASON_FILE, SEASON_FILE):
+    for name in (LAST_SEASON_FILE, SEASON_FILE, MODEL_PROJ_FILE):
         extra = _read_csv(data_dir / name)
         if extra is not None:
             df = attach_by_name(df, extra)

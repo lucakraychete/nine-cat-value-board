@@ -21,19 +21,24 @@ from ninecat.config import DEFAULT_POOL_SIZE, ROS_PRIOR_GAMES, SEASON_GAMES, cat
 from ninecat.ingest import (
     FREE_AGENT,
     LEAGUE_SCHEDULE_FILE,
+    MATCHUP_LOG_FILE,
     SCHEDULE_FILE,
     load_cached,
     load_game_logs,
     load_meta,
+    load_model_report,
     load_snapshot,
     load_table,
     snapshot_days,
+    snapshot_files,
     source_rows,
 )
+from ninecat.model.live import score_snapshots
 from ninecat.lines import SOURCES, name_key
 from ninecat.nbastats import season_label
 from ninecat.overview import (
     game_values,
+    model_loaded,
     overview,
     playoff_windows,
     preseason_snapshot,
@@ -43,9 +48,10 @@ from ninecat.overview import (
 from ninecat.schedule import games_between, remaining_games
 from ninecat.theme import app_css, tokens
 from ninecat.league import build_league
+from ninecat.trades import build_trade_model, weekly_games
 from ninecat.urlstate import PARAMS as P
 from ninecat.urlstate import PLAYER, TABS, player_href
-from ui import league_views, player_page
+from ui import league_views, model_views, player_page, trade_views
 from ui.components import (
     advanced_table,
     category_table,
@@ -82,9 +88,26 @@ def cached_board(players, cats, punt, source, games_discount, pool_size, season_
 
 
 @st.cache_data(show_spinner="Simulating every player on every team...")
-def cached_league(_board, key, cats, teams, season_games):
-    """The league model for one board; `key` stands in for hashing the board."""
-    return build_league(_board, cats, teams, season_games=season_games)
+def cached_league(_board, key, cats, teams, season_games, weeks=None, _games=None):
+    """The league model for one board; `key` stands in for hashing the board. With
+    weeks (the model source), changes count over the season left at each player's
+    weekly games (_games), as for trades."""
+    if weeks is None:
+        return build_league(_board, cats, teams, season_games=season_games)
+    return build_league(_board, cats, teams, season_games=season_games, games=_games, season_weeks=weeks)
+
+
+@st.cache_data(show_spinner=False)
+def cached_model_report():
+    return load_model_report()
+
+
+@st.cache_data(show_spinner=False)
+def cached_model_scores():
+    """The model's and ESPN's daily snapshots scored against this season so far, and the matchup log."""
+    logs = cached_logs()
+    current = logs[logs["season"] == logs["season"].max()] if not logs.empty else logs
+    return score_snapshots(snapshot_files(), current), load_table(MATCHUP_LOG_FILE)
 
 
 @st.cache_data(show_spinner=False)
@@ -101,6 +124,16 @@ def cached_overview(_players, _board, key, cats, teams, punt, pool_size, season_
     remaining = remaining_games(schedule, today).to_dict() if not schedule.empty else None
     return overview(_players, _board, cats, teams, punt=punt, pool_size=pool_size, season_games=season_games,
                     games_discount=games_discount, preseason=load_snapshot(pre_day), remaining=remaining)
+
+
+@st.cache_data(show_spinner="Valuing every roster over the rest of the season...")
+def cached_trade_model(_players, key, cats, teams, punt, pool_size, season_games, pre_day, today):
+    """The rest-of-season trade model; `key` (the fetch time) stands in for hashing the players.
+    It never depends on the board's stats source: trades are always valued rest of season."""
+    schedule = cached_schedules()[0]
+    remaining = remaining_games(schedule, today).to_dict() if not schedule.empty else None
+    return build_trade_model(_players, cats, teams, punt=punt, pool_size=pool_size, season_games=season_games,
+                             preseason=load_snapshot(pre_day), remaining=remaining)
 
 
 @st.cache_data(show_spinner=False)
@@ -202,6 +235,7 @@ JOB = refresh_job()
 boot_refresh(JOB, enabled=bool(settings and settings.auto_refresh))
 
 URL = {"bind": "query-params"}   # every setting lives in the URL (see ninecat/urlstate.py)
+trade_views.apply_pending()      # "Shop him" / "Open in calculator" from the last run
 
 with st.sidebar:
     st.subheader("Model")
@@ -268,17 +302,26 @@ with button:
 team_names = sorted(teams.values())
 my_default = teams.get(meta.get("my_team_id"))
 # The URL stores these labels, so they stay the same from season to season.
-source_labels = {"blend": "Blend", "proj": "ESPN proj", "last": "Last season", "season": "This season"}
+source_labels = {"blend": "Blend", "proj": "ESPN proj", "last": "Last season", "season": "This season",
+                 "model": "Model (ROS)"}
+MODEL_ON = model_loaded(players)
+REPORT = cached_model_report()
+ROS_LABEL = "model" if MODEL_ON else "interim"
+source_options = [s for s in SOURCES if s != "model" or MODEL_ON]
+# The model is the default only if it beat the 60/40 blend on the held-out test season.
+default_source = "model" if MODEL_ON and REPORT.get("model_beats_blend") else "blend"
 source_help = (f"Blend: 60% ESPN {seasons['current']} projection, 40% {seasons['last']} actual. "
                f"ESPN proj: the projection alone. Last season: {seasons['last']} per game. "
-               f"This season: {seasons['current']} per game so far (3+ games, else the blend).")
+               f"This season: {seasons['current']} per game so far (3+ games, else the blend)."
+               + (" Model (ROS): the trained rest-of-season projection (see the Model tab); the games discount "
+                  "and season totals use his projected share of the games left." if MODEL_ON else ""))
 with st.container(border=True, key="card_controls"):
     c1, c2, c3 = st.columns([0.9, 1.75, 0.85])
     my_team = c1.selectbox("My team", team_names, placeholder="Pick your team…",
                            index=team_names.index(my_default) if my_default in team_names else None,
                            key=P["team"], **URL)
-    source = c2.segmented_control("Stats source", list(SOURCES), format_func=source_labels.get,
-                                  default="blend", required=True, key=P["source"], help=source_help, **URL)
+    source = c2.segmented_control("Stats source", source_options, format_func=source_labels.get,
+                                  default=default_source, required=True, key=P["source"], help=source_help, **URL)
     with c3:
         st.markdown("")
         games_discount = st.toggle("Discount for games missed", value=True, key=P["discount"], **URL)
@@ -289,11 +332,28 @@ board_args = (tuple(cats), tuple(punt), source, games_discount, int(pool_size), 
               tuple(sorted(meta.get("pace", {}).items())))
 board = cached_board(players, *board_args)
 league_key = (meta.get("fetched_at"), board_args)
-league = cached_league(board, league_key, tuple(cats), tuple(team_names), int(season_games))
+TODAY = date.today()
+SCHEDULE, LEAGUE_SCHEDULE, SNAP_DAYS = cached_schedules()
+REMAINING = remaining_games(SCHEDULE, TODAY).to_dict() if not SCHEDULE.empty else None
+if source == "model":
+    week_games, weeks_left = weekly_games(board["pro_team"].tolist(), REMAINING, int(season_games))
+    league = cached_league(board, league_key, tuple(cats), tuple(team_names), int(season_games), weeks_left,
+                           week_games)
+else:
+    league = cached_league(board, league_key, tuple(cats), tuple(team_names), int(season_games))
 board = board.assign(impact=league.impact, impact_rank=league.impact_rank)
+
+opening = (date.fromisoformat(meta["season_start"]) if meta.get("season_start")
+           else pd.Timestamp(SCHEDULE["date"].min()).date() if not SCHEDULE.empty else None)
+PRESEASON = preseason_snapshot(SNAP_DAYS, opening)
+trade_args = (tuple(cats), tuple(team_names), tuple(punt), int(pool_size), int(season_games), PRESEASON.day, TODAY)
+trade_key = (meta.get("fetched_at"), trade_args)
+trade_model = cached_trade_model(players, meta.get("fetched_at"), *trade_args)
+
 ctx = {"cats": cats, "punt": punt, "source": source, "my_team": my_team, "abbrevs": abbrevs,
        "seasons": seasons, "pace": meta.get("pace", {}), "mode": MODE, "tokens": TOKENS,
-       "n_teams": len(teams), "epoch": st.session_state.epoch, "league": league, "league_key": league_key}
+       "n_teams": len(teams), "epoch": st.session_state.epoch, "league": league, "league_key": league_key,
+       "trade": trade_model, "trade_key": trade_key, "ros_label": ROS_LABEL}
 
 # ---------------------------------------------------------------- player page
 pid = st.query_params.get(PLAYER)
@@ -310,11 +370,6 @@ if pid:
 
 # ---------------------------------------------------------------- players tab inputs
 COLUMN_VIEWS = ["Overview", "Categories", "Advanced", "Schedule & role"]
-TODAY = date.today()
-SCHEDULE, LEAGUE_SCHEDULE, SNAP_DAYS = cached_schedules()
-opening = (date.fromisoformat(meta["season_start"]) if meta.get("season_start")
-           else pd.Timestamp(SCHEDULE["date"].min()).date() if not SCHEDULE.empty else None)
-PRESEASON = preseason_snapshot(SNAP_DAYS, opening)
 current_logs = cached_logs()
 current_logs = current_logs[current_logs["season"] == seasons["current"]]
 MIN_L14 = recent_minutes(current_logs, TODAY, 14)
@@ -357,7 +412,7 @@ def schedule_info(view: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------- tabs
-tab_players, tab_team, tab_fa, tab_cats = st.tabs(TABS, key=P["tab"], **URL)
+tab_players, tab_team, tab_fa, tab_trades, tab_cats, tab_model = st.tabs(TABS, key=P["tab"], **URL)
 
 with tab_players:
     f1, f2, f3, f4 = st.columns([1.3, 1.0, 0.8, 2.0], vertical_alignment="bottom")
@@ -392,7 +447,7 @@ with tab_players:
         styler, config = overview_table(view, ov, cats, punt, my_team, abbrevs, MODE,
                                         view["name"].map(name_key).map(MIN_L14),
                                         f"{PRESEASON.day:%b %d}" if PRESEASON.day and not PRESEASON.before_opening
-                                        else "")
+                                        else "", ros_label=ROS_LABEL)
         open_player(show_table(styler, config, key=f"tbl_ov_{ctx['epoch']}", links=links(view), height=640))
         pre_note = (f"Pre is ESPN's preseason projection ({PRESEASON.day:%b %d}, before opening night)"
                     if PRESEASON.before_opening else
@@ -400,9 +455,13 @@ with tab_players:
                     if PRESEASON.day else "Pre needs a saved ESPN projection snapshot (none yet)")
         html(f'<p class="note">CWA is category wins added: the extra head-to-head category wins over a season '
              f'that the average team in your league would get from him. So far = games played × his per-game '
-             f'rate. {pre_note}. ROS is interim (this season blended with the projection, weighted '
-             f'GP ÷ (GP + {ROS_PRIOR_GAMES}), over his team\'s remaining games) until the ML model replaces it. '
-             'Punted categories are greyed out and left out of the totals.</p>')
+             f'rate. {pre_note}. '
+             + ('ROS is the trained model\'s rest-of-season projection over his team\'s remaining games and his '
+                'projected share of them (injuries included), with an 80% range from its backtest errors '
+                '(see the Model tab). ' if MODEL_ON else
+                f'ROS is interim (this season blended with the projection, weighted GP ÷ (GP + {ROS_PRIOR_GAMES}), '
+                'over his team\'s remaining games) until a model is trained (python -m ninecat.model train). ')
+             + 'Punted categories are greyed out and left out of the totals.</p>')
     elif cols == "Schedule & role":
         styler, config = schedule_table(view, schedule_info(view), my_team, abbrevs, MODE, WEEK_LABELS)
         open_player(show_table(styler, config, key=f"tbl_sched_{ctx['epoch']}", links=links(view), height=640))
@@ -427,12 +486,19 @@ with tab_players:
 
 with tab_team:
     league_views.render_my_team(board, league, ctx, open_player)
+    trade_views.render_my_team_surplus(trade_model, ctx, open_player)
 
 with tab_fa:
     league_views.render_waivers(board, league, ctx, open_player)
 
+with tab_trades:
+    trade_views.render_trades(trade_model, ctx, open_player)
+
 with tab_cats:
     league_views.render_team_categories(board, league, ctx)
+
+with tab_model:
+    model_views.render_model(REPORT, *cached_model_scores(), ctx, MODEL_ON)
 
 # ---------------------------------------------------------------- footer
 adv_names = ", ".join(m.label for m in ADVANCED_METRICS)

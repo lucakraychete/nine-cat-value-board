@@ -18,8 +18,10 @@ from ninecat.lines import (
     ESPN_TOTAL_PREFIX,
     LAST_PREFIX,
     LINE_STATS,
+    MODEL_PREFIX,
     SEASON_PREFIX,
     last_line,
+    model_line,
     per36,
     per100,
     projection_line,
@@ -232,8 +234,9 @@ def recent_line(row: pd.Series, prefix: str = "R15_") -> pd.Series | None:
 
 def stat_lines(raw: pd.DataFrame, board_row: pd.Series, pace: dict[str, float] | None,
                labels: dict[str, str]) -> pd.DataFrame:
-    """This season, last 15 days, projection, last season, the board's line,
-    per 36 and per 100, per game, with G = the games behind each line.
+    """This season, last 15 days, projection, the model's rest of season, last
+    season, the board's line, per 36 and per 100, per game, with G = the games
+    behind each line (games left, for the model).
 
     `raw` is the player's single-row slice of the unvalued players frame.
     """
@@ -262,6 +265,10 @@ def stat_lines(raw: pd.DataFrame, board_row: pd.Series, pace: dict[str, float] |
     if has_proj:
         proj = projection_line(raw)
         rows.append((labels["proj"], with_games(proj, proj["GP"])))
+    model, has_model = model_line(raw)
+    if has_model.iloc[0] and "model" in labels:
+        games = pd.to_numeric(raw.get(MODEL_PREFIX + "G"), errors="coerce")
+        rows.append((labels["model"], with_games(model, games.to_numpy() if games is not None else np.nan)))
     if raw.get(LAST_PREFIX + "G", pd.Series([0])).fillna(0).iloc[0] > 0:
         last = last_line(raw)
         rows.append((labels["last"], with_games(last, last["GP"])))

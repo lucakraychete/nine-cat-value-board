@@ -11,8 +11,11 @@ min(GP / season games, 1).
   earliest snapshot on or before opening night), availability from its GP.
 - So far: impact with everyone on this season's per-game line at full
   availability (a full-season rate), times his games played / season games.
-- ROS (interim): impact on ros_line() with availability from the
-  projection, times his NBA team's remaining games / season games.
+- ROS: impact on ros_line() (the trained model's rest-of-season line
+  where there is one, else interim_ros_line()), times his NBA team's
+  remaining games / season games. With the model, availability is his
+  projected share of the games left (injuries included), and ros_lo /
+  ros_hi carry an 80% range (ros_interval()).
 
 Each total sums the per-category numbers over the scored (non-punted)
 categories; punted categories are still reported per category. Every
@@ -31,7 +34,7 @@ import pandas as pd
 from ninecat.board import BOARD_MIN_MINUTES, player_key
 from ninecat.config import NEGATIVE_CATS, PERCENT_CATS, ROS_PRIOR_GAMES
 from ninecat.league import build_league
-from ninecat.lines import ESPN_TOTAL_PREFIX, LINE_STATS, SEASON_PREFIX, stat_line
+from ninecat.lines import ESPN_TOTAL_PREFIX, LINE_STATS, MODEL_PREFIX, SEASON_PREFIX, model_line, stat_line
 from ninecat.valuation import value_players
 
 LINE_COLS = [*LINE_STATS, "GP"]
@@ -97,8 +100,27 @@ def snapshot_line(players: pd.DataFrame, snapshot: pd.DataFrame | None) -> pd.Da
     return _with_line(players, line)
 
 
+def model_loaded(players: pd.DataFrame) -> bool:
+    """Whether the trained model's predictions are attached (M_ columns from load_cached())."""
+    col = MODEL_PREFIX + "PTS"
+    return col in players and bool(players[col].notna().any())
+
+
 def ros_line(players: pd.DataFrame, preseason: pd.DataFrame | None, k: float = ROS_PRIOR_GAMES) -> pd.DataFrame:
-    """Interim rest-of-season per-game line (PLAN.md Part 5 replaces this).
+    """The rest-of-season per-game line every ROS number uses (the Overview's ROS
+    column, trades): the trained model's line (M_ columns, GP his projected share
+    of the games left x 82) where it has one, else interim_ros_line()."""
+    interim = interim_ros_line(players, preseason, k)
+    model, has = model_line(players)
+    if not has.any():
+        return interim
+    line = interim[LINE_COLS].where(~has, model[LINE_COLS], axis=0)
+    return _with_line(players, line)
+
+
+def interim_ros_line(players: pd.DataFrame, preseason: pd.DataFrame | None,
+                     k: float = ROS_PRIOR_GAMES) -> pd.DataFrame:
+    """The fallback rest-of-season line, for when no model is trained (or it has no line for him).
 
     Each stat, makes and attempts included, is w x this season + (1 - w) x
     the preseason projection, with w = GP / (GP + k) and GP his games this
@@ -124,8 +146,9 @@ def ros_line(players: pd.DataFrame, preseason: pd.DataFrame | None, k: float = R
 
 def impact_by_category(line: pd.DataFrame, cats: Sequence[str], teams: Sequence[str], punt: Sequence[str],
                        pool_size: int, season_games: int, games_discount: bool,
-                       min_minutes: float = BOARD_MIN_MINUTES) -> pd.DataFrame:
-    """League impact per category for everyone with a line, indexed by player key.
+                       min_minutes: float = BOARD_MIN_MINUTES, per_game_value: bool = False):
+    """League impact per category for everyone with a line, indexed by player key
+    (with per_game_value, also each player's per-game value, z_total).
 
     The league is valued on this one line for everybody, so every player is
     measured against teams built from the same kind of numbers.
@@ -133,11 +156,30 @@ def impact_by_category(line: pd.DataFrame, cats: Sequence[str], teams: Sequence[
     has = line[LINE_STATS].notna().all(axis=1) & (line["MIN"].fillna(0) >= min_minutes)
     rows = line[has]
     if len(rows) < 2:
-        return pd.DataFrame(columns=list(cats), dtype=float)
+        empty = pd.DataFrame(columns=list(cats), dtype=float)
+        return (empty, pd.Series(dtype=float)) if per_game_value else empty
     valued = value_players(rows, cats, punt=punt, pool_size=pool_size, season_games=season_games,
                            games_discount=games_discount)
     lg = build_league(valued, cats, teams, season_games=season_games)
-    return pd.DataFrame(lg.impact_by_cat, columns=list(cats), index=player_key(valued).to_numpy())
+    keys = player_key(valued).to_numpy()
+    impact = pd.DataFrame(lg.impact_by_cat, columns=list(cats), index=keys)
+    return (impact, pd.Series(valued["z_total"].to_numpy(), index=keys)) if per_game_value else impact
+
+
+def ros_interval(ros: np.ndarray, value: np.ndarray, scale: np.ndarray, lo: np.ndarray, hi: np.ndarray
+                 ) -> tuple[np.ndarray, np.ndarray]:
+    """An 80% range for ROS CWA from the model's range for per-game value.
+
+    The model's intervals are in per-game value (sum of z-scores), from its
+    backtest errors. Across the board, ROS CWA moves almost linearly with
+    per-game value x the share of the season left (scale), so the range is
+    ROS + slope x value offset x scale, the slope fit by least squares.
+    """
+    x, ok = value * scale, np.isfinite(ros) & np.isfinite(value) & np.isfinite(scale)
+    if ok.sum() < 3 or np.var(x[ok]) == 0:
+        return np.full(len(ros), np.nan), np.full(len(ros), np.nan)
+    slope = np.polyfit(x[ok], ros[ok], 1)[0]
+    return ros + slope * lo * scale, ros + slope * hi * scale
 
 
 def overview(players: pd.DataFrame, board: pd.DataFrame, cats: Sequence[str], teams: Sequence[str],
@@ -162,16 +204,28 @@ def overview(players: pd.DataFrame, board: pd.DataFrame, cats: Sequence[str], te
 
     pre = impact_by_category(snapshot_line(p, preseason), *args, games_discount=games_discount).reindex(keys)
 
-    ros_rate = impact_by_category(ros_line(p, preseason), *args, games_discount=games_discount).reindex(keys)
+    ros_rate, ros_value = impact_by_category(ros_line(p, preseason), *args, games_discount=games_discount,
+                                             per_game_value=True)
+    ros_rate = ros_rate.reindex(keys)
     team = board["pro_team"].to_numpy(object)
     left = np.array([remaining.get(t, np.nan) if remaining else season_games for t in team], dtype=float)
-    ros = ros_rate.mul(np.clip(left / season_games, 0, 1), axis=0)
+    share = np.clip(left / season_games, 0, 1)
+    ros = ros_rate.mul(share, axis=0)
 
     out = pd.DataFrame(index=board.index)
     out["gp"] = gp.to_numpy()
     out["so_far"] = so_far[scored].sum(axis=1).to_numpy()
     out["pre"] = pre[scored].sum(axis=1, min_count=1).to_numpy() if scored else np.nan
     out["ros"] = ros[scored].sum(axis=1, min_count=1).to_numpy() if scored else np.nan
+    out["ros_lo"] = out["ros_hi"] = np.nan
+    if model_loaded(p) and MODEL_PREFIX + "lo_VALUE" in p:
+        by_key = p.set_index(player_key(p).to_numpy())
+        by_key = by_key[~by_key.index.duplicated()].reindex(keys)
+        avail = (by_key[MODEL_PREFIX + "GP"] / season_games).clip(0, 1).to_numpy(float)
+        lo, hi = ros_interval(out["ros"].to_numpy(float), ros_value.reindex(keys).to_numpy(float), share * avail,
+                              by_key[MODEL_PREFIX + "lo_VALUE"].to_numpy(float),
+                              by_key[MODEL_PREFIX + "hi_VALUE"].to_numpy(float))
+        out["ros_lo"], out["ros_hi"] = lo, hi
     for c in cats:
         out[f"sf_{c}"] = so_far[c].to_numpy()
     for col in ("so_far", "pre", "ros"):

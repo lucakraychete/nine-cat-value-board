@@ -266,16 +266,17 @@ def win_change(teams: Sequence[str], before: Sequence[float], after: Sequence[fl
     return fig
 
 
-def category_strength(cats: Sequence[str], by_cat: Sequence[float], ranks: Sequence[int], weeks: int,
+def category_strength(cats: Sequence[str], by_cat: Sequence[float], ranks: Sequence[int], weeks: float,
                       punt: Sequence[str], t: dict) -> go.Figure:
     """Share of weeks each category is won, with wins out of `weeks` and league rank."""
     y = list(cats)[::-1]
     p = list(by_cat)[::-1]
     rk = list(ranks)[::-1]
+    wk = f"{weeks:.0f}" if abs(weeks - round(weeks)) < 0.05 else f"{weeks:.1f}"
     colors = [rgba(t["good"] if v >= 0.5 else t["bad"], 0.35 if c in punt else 1.0) for c, v in zip(y, p)]
     fig = go.Figure(go.Bar(
         x=p, y=y, orientation="h", marker_color=colors, cliponaxis=False, textposition="outside",
-        text=[f"{v * weeks:.1f} of {weeks} · #{r}{' · punt' if c in punt else ''}" for c, v, r in zip(y, p, rk)],
+        text=[f"{v * weeks:.1f} of {wk} · #{r}{' · punt' if c in punt else ''}" for c, v, r in zip(y, p, rk)],
         textfont=dict(size=11, color=t["ink"]),
         hovertemplate="%{y}: wins %{x:.0%} of weeks<extra></extra>"))
     _layout(fig, t, _row_height(len(y)), margin=dict(l=48, r=120, t=8, b=24))
@@ -330,4 +331,35 @@ def percentile_bars(items, t: dict, pos: str) -> go.Figure:
     _layout(fig, t, 44 * n + 16, margin=dict(l=170, r=110, t=8, b=8))
     fig.update_xaxes(range=[0, 100], visible=False, fixedrange=True)
     fig.update_yaxes(range=[-0.7, n - 0.3], visible=False, fixedrange=True)
+    return fig
+
+
+def coverage_bars(cats: Sequence[str], coverage: Sequence[float], nominal: float, t: dict) -> go.Figure:
+    """Share of held-out outcomes inside the model's interval, per category, against the target share."""
+    fig = go.Figure(go.Bar(
+        x=list(coverage), y=list(cats), orientation="h", marker_color=t["s1"],
+        text=[f"{c:.0%}" for c in coverage], textposition="outside", cliponaxis=False,
+        textfont=dict(size=11, color=t["ink"]),
+        hovertemplate="%{y}: %{x:.0%} of outcomes inside the interval<extra></extra>"))
+    fig.add_vline(x=nominal, line=dict(color=t["muted"], dash="dash", width=1))
+    _layout(fig, t, _row_height(len(cats)), margin=dict(l=_label_margin(cats), r=44, t=8, b=24))
+    _pct_axis(fig, t)
+    fig.update_layout(bargap=0.35)
+    return fig
+
+
+def calibration_plot(predicted: Sequence[float], actual: Sequence[float], counts: Sequence[int],
+                     t: dict) -> go.Figure:
+    """Predicted chance against how often it happened, per bin; on the diagonal is well calibrated."""
+    fig = go.Figure()
+    fig.add_shape(type="line", x0=0, y0=0, x1=1, y1=1, line=dict(color=t["muted"], dash="dash", width=1))
+    fig.add_trace(go.Scatter(
+        x=list(predicted), y=list(actual), mode="markers+text", text=[f"n={n}" for n in counts],
+        textposition="top center", textfont=dict(size=10, color=t["muted"]),
+        marker=dict(size=[8 + min(n, 40) / 2 for n in counts], color=t["s1"]),
+        hovertemplate="predicted %{x:.0%}, happened %{y:.0%}<extra></extra>"))
+    _layout(fig, t, 280, margin=dict(l=40, r=12, t=8, b=36))
+    fig.update_xaxes(range=[0, 1], tickformat=".0%", title_text="Predicted win chance", fixedrange=True,
+                     gridcolor=t["line"])
+    fig.update_yaxes(range=[0, 1], tickformat=".0%", title_text="Won", fixedrange=True, gridcolor=t["line"])
     return fig

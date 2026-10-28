@@ -281,11 +281,12 @@ def season_minutes(board: pd.DataFrame) -> pd.Series:
 
 
 def overview_table(board: pd.DataFrame, ov: pd.DataFrame, cats: list[str], punt: list[str], my_team: str | None,
-                   abbrevs: dict[str, str], mode: str, min_l14: pd.Series, pre_day: str):
+                   abbrevs: dict[str, str], mode: str, min_l14: pd.Series, pre_day: str, ros_label: str = "interim"):
     """Pre, so far and ROS category wins added, with ranks, and the so-far per category.
 
     `ov` is overview() for these board rows; min_l14 is aligned to them too.
-    Returns (styler, column_config).
+    ros_label is "model" or "interim"; with the model, an 80% range column
+    follows ROS Rk. Returns (styler, column_config).
     """
     labels = {c: f"{c} (punt)" if c in punt else c for c in cats}
     frame = _base_frame(board, abbrevs, tagged=True)
@@ -295,6 +296,10 @@ def overview_table(board: pd.DataFrame, ov: pd.DataFrame, cats: list[str], punt:
     for col, src in (("So far", "so_far"), ("So far Rk", "so_far_rank"), ("Pre", "pre"), ("Pre Rk", "pre_rank"),
                      ("Rk Δ", "rank_delta"), ("ROS", "ros"), ("ROS Rk", "ros_rank")):
         frame[col] = pd.to_numeric(ov[src], errors="coerce").astype(float).values
+    ranged = ros_label == "model" and "ros_lo" in ov and ov["ros_lo"].notna().any()
+    if ranged:
+        frame["ROS 80%"] = [f"{lo:+.1f} to {hi:+.1f}" if pd.notna(lo) and pd.notna(hi) else DASH
+                            for lo, hi in zip(ov["ros_lo"], ov["ros_hi"])]
     for c in cats:
         frame[labels[c]] = ov[f"sf_{c}"].values
 
@@ -336,10 +341,19 @@ def overview_table(board: pd.DataFrame, ov: pd.DataFrame, cats: list[str], punt:
         "Pre Rk": st.column_config.NumberColumn(width=58, help="Rank by Pre among every player on the board"),
         "Rk Δ": st.column_config.NumberColumn(width=52, help="Pre Rk minus So far Rk"),
         "ROS": st.column_config.NumberColumn(
-            width=58, help="ROS (interim): category wins added over his team's remaining games on a blend of this "
-                           "season and the preseason projection, weighted GP ÷ (GP + 20); the ML projection replaces it"),
+            label="ROS (model)", width=86,
+            help="ROS (model): category wins added over his team's remaining games on the trained model's "
+                 "rest-of-season line and his projected share of those games (injuries included)")
+        if ros_label == "model" else st.column_config.NumberColumn(
+            label="ROS (interim)", width=86,
+            help="ROS (interim): category wins added over his team's remaining games on a blend of this season "
+                 "and the preseason projection, weighted GP ÷ (GP + 20); the trained model replaces it"),
         "ROS Rk": st.column_config.NumberColumn(width=62, help="Rank by ROS among every player on the board"),
     }
+    if ranged:
+        config["ROS 80%"] = st.column_config.TextColumn(
+            width=104, help="80% range for ROS: the model's backtest error range for his per-game value at his "
+                            "games played and minutes, converted to category wins added")
     for c in cats:
         config[labels[c]] = st.column_config.NumberColumn(
             width=62, help=f"{c} category wins added so far" + (" (punted: not in the totals)" if c in punt else ""))
@@ -414,7 +428,8 @@ def show_table(styler, config, key: str, links: Mapping[str, Sequence] | None = 
     height = fit_height(styler, height)
     config = dict(config)
     for col in links or {}:
-        config[col] = {**(config.get(col) or {}), "help": LINK_HELP}
+        own = dict(config.get(col) or {})
+        config[col] = {**own, "help": own.get("help") or LINK_HELP}
     event = st.dataframe(styler, column_config=config, hide_index=True, height=height, row_height=ROW_HEIGHT,
                          on_select="rerun", selection_mode="single-cell", key=key, placeholder=DASH)
     cells = event.selection.cells if event is not None else []

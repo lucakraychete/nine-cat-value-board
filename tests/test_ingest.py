@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from ninecat import ingest
+from ninecat.config import HISTORY_FIRST_SEASON_START
 from ninecat.ingest import UNDRAFTED_ADP, adp_from_players, load_cached, load_game_logs
 from ninecat.nbastats import LOG_COLUMNS
 
@@ -248,7 +249,7 @@ def test_ingest_history_skips_cached_seasons(tmp_path, monkeypatch):
     for p in ingest.history_paths(tmp_path, "2017-18"):
         ingest.write_csv(pd.DataFrame({"z": [0]}), p)
     status = ingest.ingest_history(2027, tmp_path, log=lambda *_: None)
-    assert list(status) == [f"{y}-{str(y + 1)[2:]}" for y in range(2017, 2026)]
+    assert list(status) == [f"{y}-{str(y + 1)[2:]}" for y in range(HISTORY_FIRST_SEASON_START, 2026)]
     assert status["2017-18"] == "cached" and "2017-18" not in fetched
     assert status["2019-20"].startswith("failed") and status["2020-21"].startswith("ok")
     assert ingest.history_paths(tmp_path, "2025-26")[0].exists()
@@ -267,3 +268,40 @@ def test_snapshot_days_and_loading(tmp_path):
     assert ingest.snapshot_days(tmp_path) == [date(2026, 10, 18), date(2026, 10, 23)]
     assert ingest.load_snapshot(date(2026, 10, 18), tmp_path)["PTS"].tolist() == [18]
     assert ingest.load_snapshot(None, tmp_path) is None and ingest.load_snapshot(date(2026, 1, 1), tmp_path) is None
+
+
+# ---------------------------------------------------------------- the rest-of-season model
+
+def test_load_cached_attaches_model_predictions(tmp_path):
+    pd.DataFrame({"player_id": [1, 2], "name": ["Nikola Jokić", "Rookie Guy"], "team_id": [2, 3],
+                  "PTS": [28.0, 9.0]}).to_csv(tmp_path / ingest.PLAYERS_FILE, index=False)
+    pd.DataFrame({"name_key": ["nikola jokic"], "nba_id": [203999], "M_PTS": [27.1], "M_G": [61.0]}).to_csv(
+        tmp_path / ingest.MODEL_PROJ_FILE, index=False)
+    df, _ = load_cached(tmp_path)
+    assert df.loc[0, "M_PTS"] == 27.1 and pd.isna(df.loc[1, "M_PTS"])
+
+
+def test_no_trained_model_is_waiting_not_failed(tmp_path):
+    status = ingest.ingest_model(tmp_path, 2027, datetime(2026, 11, 1, tzinfo=timezone.utc))
+    assert status.startswith(ingest.NOT_YET) and not (tmp_path / ingest.MODEL_PROJ_FILE).exists()
+    rows = ingest.source_rows({"sources": {"model": {"status": status, "updated": None}}})
+    assert rows[0]["state"] == "waiting"
+
+
+def test_a_broken_model_file_loads_as_none(tmp_path):
+    path = tmp_path / ingest.MODELS_DIR / ingest.MODEL_FILE
+    path.parent.mkdir()
+    path.write_bytes(b"not a pickle")
+    assert ingest.load_ros_model(tmp_path) is None
+    assert ingest.load_model_report(tmp_path) == {}
+
+
+def test_snapshot_files_lists_both_kinds_by_day(tmp_path):
+    snaps = tmp_path / ingest.SNAPSHOT_DIR
+    snaps.mkdir()
+    pd.DataFrame({"name": ["A"], "PTS": [1.0]}).to_csv(snaps / "espn_proj_2026-10-18.csv", index=False)
+    pd.DataFrame({"name_key": ["a"], "M_PTS": [1.0]}).to_csv(
+        ingest.model_snapshot_path(tmp_path, date(2026, 10, 28)), index=False)
+    (snaps / "espn_proj_notadate.csv").write_text("x\n1\n")
+    got = [(k, d) for k, d, _ in ingest.snapshot_files(tmp_path)]
+    assert got == [("espn", date(2026, 10, 18)), ("model", date(2026, 10, 28))]

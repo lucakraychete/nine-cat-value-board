@@ -21,7 +21,9 @@ LAST_PREFIX = "L_"
 SEASON_PREFIX = "S_"       # this season to date, from nba.com game logs
 ESPN_TOTAL_PREFIX = "T_"   # this season to date, as ESPN reports it
 
-SOURCES = {"blend": "Blend", "proj": "Projection", "last": "Last season", "season": "This season"}
+SOURCES = {"blend": "Blend", "proj": "Projection", "last": "Last season", "season": "This season",
+           "model": "Model (rest of season)"}
+MODEL_PREFIX = "M_"         # the trained model's rest-of-season line (ninecat/model/predict.py)
 # Fewer games than this and "This season" falls back to the blend.
 SEASON_MIN_GAMES = 3
 # Blend = 60% projection, 40% last season, when he played enough to trust it.
@@ -137,6 +139,15 @@ def season_line(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     return line, use_nba | (espn_g >= SEASON_MIN_GAMES)
 
 
+def model_line(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+    """The trained model's rest-of-season line, and who has one."""
+    line = pd.DataFrame(index=df.index)
+    for s in [*LINE_STATS, "GP"]:
+        col = MODEL_PREFIX + s
+        line[s] = df[col].astype(float) if col in df else np.nan
+    return line, line[LINE_STATS].notna().all(axis=1)
+
+
 def stat_line(df: pd.DataFrame, source: str = "blend") -> pd.DataFrame:
     """The per-game line each player is valued on, as a copy of df.
 
@@ -148,6 +159,9 @@ def stat_line(df: pd.DataFrame, source: str = "blend") -> pd.DataFrame:
       players with no projection use last season. GP is the projection's.
     - "season": this season so far (see season_line); players with fewer
       than 3 games use the blend.
+    - "model": the trained model's rest-of-season line (M_ columns), GP his
+      projected share of the games left x 82; players it has no line for use
+      the blend.
 
     Rows with no usable line get NaN stats and has_line False.
     """
@@ -174,6 +188,10 @@ def stat_line(df: pd.DataFrame, source: str = "blend") -> pd.DataFrame:
             season["GP"] = season["GP"].where(has_p, line["GP"])
             line = season.where(has_s, line, axis=0)
             has = has | has_s
+        elif source == "model":
+            model, has_m = model_line(df)
+            line = model.where(has_m, line, axis=0)
+            has = has | has_m
 
     out = df.copy()
     cols = [*LINE_STATS, "GP"]

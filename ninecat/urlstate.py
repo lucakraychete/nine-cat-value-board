@@ -27,9 +27,21 @@ PARAMS = {
     "exclude_to": "to",
     "pool_size": "pool",
     "season_games": "games",
+    # trades: the calculator and the finder
+    "trade_partner": "tp",
+    "trade_give": "give",
+    "trade_get": "get",
+    "finder_mode": "fm",
+    "finder_cat": "fcat",
+    "veto": "veto",
+    "finder_partner": "fp",
+    "two_for_two": "f22",
+    # the Model tab
+    "model_season": "msea",
+    "model_k": "mk",
 }
 PLAYER = "player"
-TABS = ["Players", "My team", "Waiver wire", "Team categories"]
+TABS = ["Players", "My team", "Waiver wire", "Trades", "Team categories", "Model"]
 
 
 def player_href(pid, params: Mapping[str, str | Sequence[str]]) -> str:

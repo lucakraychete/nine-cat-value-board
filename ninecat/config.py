@@ -33,8 +33,9 @@ SEASON_GAMES = 82
 # against the preseason projection, so after K games it counts half.
 ROS_PRIOR_GAMES = 20
 
-# Model history: regular seasons from 2017-18 through last season.
-HISTORY_FIRST_SEASON_START = 2017
+# Model history: regular seasons from 2015-16 through last season. The model trains
+# from 2017-18; 2015-16 and 2016-17 are only the prior seasons for its first years.
+HISTORY_FIRST_SEASON_START = 2015
 # The NBA schedule and last season's nba.com numbers barely change, so
 # they're refetched about once a week rather than on every refresh.
 STATIC_MAX_AGE_DAYS = 7

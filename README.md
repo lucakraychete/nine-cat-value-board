@@ -59,14 +59,34 @@ and **8-cat** leagues without turnovers (`EXCLUDE_TO=true`, the default).
 - **League impact.** Every player's worth to every team in extra category
   wins over a 20-week season, his impact for the average team, and his
   impact over the best free agent at his position.
+- **Trades.** A calculator for deals up to 3-for-3: the change in category
+  wins and weekly matchup win chance for both teams, both rosters after the
+  trade (with the drops and free-agent pickups that keep roster sizes), and a
+  check that each team still has a healthy player at every position. A
+  "who to trade, and to whom" table ranks your players by how much more
+  they'd add for another team, and a finder searches 1-for-1 to 2-for-2
+  deals that help you, read as fair to the other manager (name, headline
+  stats, positional need, loss aversion) and stay under a veto cap. Trades
+  are always valued on the rest of the season, whatever stats source the
+  board shows, over each player's NBA team's remaining games.
+- **Rest-of-season model.** A projection model trained on nine past seasons
+  of box scores predicts each player's per-game line and games played for
+  the rest of the season, with an 80% range: per-stat empirical-Bayes
+  shrinkage toward his last two seasons, a separate minutes model, and a
+  gradient-boosting correction. On a held-out season it misses by 25% less
+  than the 60/40 blend and ranks players better, so it's the default stats
+  source. It drives the Overview's ROS column, trades and the player page,
+  and its daily predictions are scored against real results as the season
+  goes. Details: [docs/MODEL.md](docs/MODEL.md).
 
-The app has four tabs: **Players** (everyone, filterable, with a Categories
+The app has six tabs: **Players** (everyone, filterable, with a Categories
 or Advanced column set and league impact), **My team** (projected standing,
 category outlook, matchup odds against every team, what each player is
 worth to you, best pickups), **Waiver wire** (the top five pickups as
-cards, then every free agent tried against every possible drop) and
-**Team categories** (your build, each team's per-game category totals and
-league ranks, plus projected standings).
+cards, then every free agent tried against every possible drop), **Trades**
+(calculator, finder, and who to shop where), **Team categories** (your build, each team's per-game category totals and
+league ranks, plus projected standings) and **Model** (how the
+rest-of-season model was built and tested, and how it's doing this season).
 It follows your system's light or dark mode; switch in the app's settings menu.
 
 Data comes from ESPN (your league, projections, ADP), nba.com via
@@ -118,7 +138,8 @@ Then pull data and start the app:
 source .venv/bin/activate       # Windows Git Bash: source .venv/Scripts/activate
                                 # Windows PowerShell: .venv\Scripts\Activate.ps1
 python -m ninecat.ingest        # caches your league and nba.com stats to data/
-python -m ninecat.ingest --history   # once: 2017-18 onward for the projection model (~20 s)
+python -m ninecat.ingest --history   # once: 2015-16 onward for the projection model (~25 s)
+python -m ninecat.model train        # then: train the rest-of-season model (~2.5 min)
 streamlit run app.py
 ```
 
@@ -172,12 +193,16 @@ ninecat/
   board.py       the board: value plus per-36/per-100, market gap, tiers
   matchup.py     head-to-head matchup model
   league.py      team totals, league impact, waivers
+  overview.py    category wins added: preseason, so far, rest of season
+  trades.py      trade calculator, perceived value, trade finder (rest of season)
+  model/         rest-of-season projection model: dataset, baselines, shrinkage,
+                 boosting, games, evaluation, training CLI (docs/MODEL.md)
   player.py      player-page numbers
   charts.py      plotly charts
   theme.py       colors, fonts, CSS
   urlstate.py    settings in the URL, player links
 app.py           Streamlit entry point
-ui/              Streamlit rendering (tables, player page, background refresh)
+ui/              Streamlit rendering (tables, player page, trades, background refresh)
 tests/           pytest suite, synthetic data, no network
 ```
 

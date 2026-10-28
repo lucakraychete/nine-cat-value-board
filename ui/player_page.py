@@ -11,8 +11,8 @@ import streamlit as st
 from ninecat import charts
 from ninecat.board import player_key
 from ninecat.league import League, drop_options, fit_note, uncertainty
-from ninecat.matchup import WEEKS, change, outlook
-from ninecat.lines import SOURCES, name_key
+from ninecat.matchup import outlook
+from ninecat.lines import MODEL_PREFIX, SOURCES, name_key, projection_line
 from ninecat.player import (
     category_profile,
     comparables,
@@ -26,6 +26,7 @@ from ninecat.player import (
     season_so_far,
     stat_lines,
 )
+from ui import trade_views
 from ui.components import (
     FREE_AGENT,
     card,
@@ -55,8 +56,19 @@ def pos_neg(x: float, threshold: float = 0.005) -> str:
     return "pos" if x > threshold else "neg" if x < -threshold else ""
 
 
-def _uncertainty_tile(lg: League, idx: int, r: pd.Series) -> str:
-    u = uncertainty(lg.impact[idx], r.get("L_G"), r.get("injury_status"))
+def _impact_slope(board: pd.DataFrame, lg: League) -> float:
+    """League impact per unit of per-game value across the board (least squares)."""
+    x, y = board["z_total"].to_numpy(float), np.asarray(lg.impact, float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    return float(np.polyfit(x[ok], y[ok], 1)[0]) if ok.sum() > 2 else np.nan
+
+
+def _uncertainty_tile(lg: League, idx: int, r: pd.Series, board: pd.DataFrame) -> str:
+    lo, hi = r.get(MODEL_PREFIX + "lo_VALUE"), r.get(MODEL_PREFIX + "hi_VALUE")
+    has = lo is not None and hi is not None and pd.notna(lo) and pd.notna(hi)
+    u = uncertainty(lg.impact[idx], r.get("L_G"), r.get("injury_status"),
+                    (float(lo), float(hi)) if has else None, _impact_slope(board, lg) if has else None,
+                    r.get(MODEL_PREFIX + "k"))
     return (f'<div title="{escape(u.why)}"><b>{u.low:+.1f} to {u.high:+.1f}</b>'
             f'<span>impact range · {u.label}</span></div>')
 
@@ -129,14 +141,14 @@ def _impact_section(board: pd.DataFrame, lg: League, i: int, ctx: dict, open_pla
             framing = ((f"Adding {escape(lg.names[i])} and dropping {escape(lg.names[outgoing])}" if fa else
                         f"Trading {escape(lg.names[outgoing])} for {escape(lg.names[i])}") + best)
         html(f'<p class="note">{framing}. Each category is simulated against every other team\'s current roster for '
-             f'{WEEKS} head-to-head weeks, so "expected wins" is out of {WEEKS} in each category.</p>')
+             f'{lg.weeks_text} head-to-head weeks, so "expected wins" is out of {lg.weeks_text} in each category.</p>')
 
         weeks = lg.swap_weeks(me, incoming, outgoing)
         base, swapped = lg.base[me], outlook(me, weeks, lg.stats)
         rk0, rk1 = lg.cat_rank.loc[me], lg.ranks(weeks).loc[me]
         before, after = (swapped, base) if own else (base, swapped)
         r_before, r_after = (rk1, rk0) if own else (rk0, rk1)
-        ch = change(before, after)
+        ch = lg.change(before, after)
         html(f"""<div class="hero">
             <div><b class="{pos_neg(ch.cats)}">{ch.cats:+.1f}</b><span>category wins over the season for you</span></div>
             <div><b class="{pos_neg(ch.win)}">{ch.win * 100:+.1f} pts</b><span>weekly matchup win chance</span></div>
@@ -146,12 +158,12 @@ def _impact_section(board: pd.DataFrame, lg: League, i: int, ctx: dict, open_pla
         with left:
             h4("Expected category wins over the season")
             rows = "".join(
-                f'<tr><td class="l"><b>{c}</b></td><td>{before.by_cat[k] * WEEKS:.1f}</td>'
-                f'<td>{after.by_cat[k] * WEEKS:.1f}</td><td class="{pos_neg(ch.by_cat[k])}">{ch.by_cat[k]:+.2f}</td>'
+                f'<tr><td class="l"><b>{c}</b></td><td>{before.by_cat[k] * lg.season_weeks:.1f}</td>'
+                f'<td>{after.by_cat[k] * lg.season_weeks:.1f}</td><td class="{pos_neg(ch.by_cat[k])}">{ch.by_cat[k]:+.2f}</td>'
                 f'<td>{r_before[c]} → <b>{r_after[c]}</b></td>'
                 f'<td class="{pos_neg(lg.impact_by_cat[i, k])}">{lg.impact_by_cat[i, k]:+.2f}</td></tr>'
                 for k, c in enumerate(cats))
-            tot_b, tot_a = before.by_cat.sum() * WEEKS, after.by_cat.sum() * WEEKS
+            tot_b, tot_a = before.by_cat.sum() * lg.season_weeks, after.by_cat.sum() * lg.season_weeks
             rows += (f'<tr><td class="l"><b>Total</b></td><td><b>{tot_b:.1f}</b></td><td><b>{tot_a:.1f}</b></td>'
                      f'<td class="{pos_neg(tot_a - tot_b)}"><b>{tot_a - tot_b:+.2f}</b></td><td></td>'
                      f'<td class="{pos_neg(imp)}"><b>{imp:+.2f}</b></td></tr>')
@@ -263,7 +275,7 @@ def render(board: pd.DataFrame, players: pd.DataFrame, pid, ctx: dict, open_play
             <div><b>{pos} #{pos_rank}</b><span>of {len(group)} {pos}s</span></div>
             <div><b>{'#' + str(int(r['p36_rank'])) if pd.notna(r['p36_rank']) else '–'}</b><span>Per-36 rank</span></div>
             <div><b>{'#' + str(int(r['p100_rank'])) if pd.notna(r['p100_rank']) else '–'}</b><span>Per-100-poss rank</span></div>
-            <div><b>{fmt_num(adp)}</b><span>ADP {gap_txt}</span></div>{_uncertainty_tile(lg, idx, r)}</div>""")
+            <div><b>{fmt_num(adp)}</b><span>ADP {gap_txt}</span></div>{_uncertainty_tile(lg, idx, r, board)}</div>""")
     html(_season_strip(r, ctx["seasons"]["current"]))
 
     # ---- tier ladder
@@ -274,6 +286,8 @@ def render(board: pd.DataFrame, players: pd.DataFrame, pid, ctx: dict, open_play
 
     # ---- league model: impact, worth to each team, replacement, fit
     _impact_section(board, lg, idx, ctx, open_player)
+    if ctx.get("trade") is not None:
+        trade_views.render_trades_for(ctx["trade"], pid, ctx, open_player)
     left, right = st.columns(2)
     with left, card("worth"):
         card_title("Worth to each team", "Category wins over the season each team would gain by getting him, "
@@ -372,14 +386,18 @@ def render(board: pd.DataFrame, players: pd.DataFrame, pid, ctx: dict, open_play
             legend([(t["s1"], "vs all players"), (t["s2"], f"vs {pos}s")])
             _chart(charts.percentile_bars(rate_items(board, idx), t, pos), "pp_rates")
 
+    _ros_card(r, raw.head(1), ctx)
+
     with card("lines"):
         card_title("Stat lines", "Per game, per 36 minutes and per 100 possessions. G is the games behind each "
-                                 "line (projected games for the projection and the board line).")
+                                 "line (projected games for the projection and the board line, games left for "
+                                 "the model).")
         pace = ctx["pace"].get(r["pro_team"])
         lines = stat_lines(raw.head(1), r, ctx["pace"], {
             "season": f"{ctx['seasons']['current']} so far",
             "recent": "Last 15 days (ESPN)",
             "proj": f"{ctx['seasons']['current']} ESPN projection",
+            "model": "Rest of season (model)",
             "last": f"{ctx['seasons']['last']} actual",
             "board": f"Board line: {SOURCES[ctx['source']]}",
             "per100": f"Per 100 possessions ({r['pro_team']} pace {pace:.1f})" if pace else "Per 100 possessions",
@@ -388,3 +406,52 @@ def render(board: pd.DataFrame, players: pd.DataFrame, pid, ctx: dict, open_play
         fmt.update({"G": "{:.0f}", "FG%": fmt_pct, "FT%": fmt_pct})
         st.dataframe(lines.style.format(fmt, na_rep="–"), hide_index=True, row_height=30, placeholder="–",
                      column_config={"Line": st.column_config.TextColumn(width="large")})
+
+
+ROS_CATS = ["MIN", "PTS", "REB", "AST", "STL", "BLK", "3PM", "TO", "FG%", "FT%"]
+
+
+def _ros_card(r: pd.Series, raw: pd.DataFrame, ctx: dict) -> None:
+    """The model's rest-of-season line with its 80% range, next to ESPN's projection and this season."""
+    if pd.isna(r.get(MODEL_PREFIX + "PTS")):
+        return
+    first = raw.iloc[0]
+    proj = projection_line(raw).iloc[0]
+    now = season_so_far(first)
+
+    def pct(line, made, att):
+        return line[made] / line[att] if line is not None and line.get(att, 0) and line[att] > 0 else np.nan
+
+    def value(line, c):
+        if line is None:
+            return np.nan
+        if c == "FG%":
+            return pct(line, "FGM", "FGA")
+        if c == "FT%":
+            return pct(line, "FTM", "FTA")
+        return line.get(c, np.nan)
+
+    model = {c: r[MODEL_PREFIX + c] for c in ROS_CATS if c not in ("FG%", "FT%")}
+    model["FG%"] = r[MODEL_PREFIX + "FGM"] / r[MODEL_PREFIX + "FGA"] if r[MODEL_PREFIX + "FGA"] > 0 else np.nan
+    model["FT%"] = r[MODEL_PREFIX + "FTM"] / r[MODEL_PREFIX + "FTA"] if r[MODEL_PREFIX + "FTA"] > 0 else np.nan
+    rows = []
+    for c in ROS_CATS:
+        lo, hi = r.get(MODEL_PREFIX + "lo_" + c), r.get(MODEL_PREFIX + "hi_" + c)
+        is_pct = c in ("FG%", "FT%")
+        fmt = (lambda v: f"{v:.3f}".lstrip("0") if pd.notna(v) else "–") if is_pct else \
+            (lambda v: f"{v:.1f}" if pd.notna(v) else "–")
+        rows.append({"Category": c, "Model (rest of season)": fmt(model[c]),
+                     "80% range": f"{fmt(max(lo, 0))} – {fmt(hi)}" if pd.notna(lo) and pd.notna(hi) else "–",
+                     "ESPN projection": fmt(value(proj, c)), f"{ctx['seasons']['current']} so far": fmt(value(now, c))})
+    games, avail = r.get(MODEL_PREFIX + "G"), r.get(MODEL_PREFIX + "avail")
+    with card("ros_model"):
+        card_title("Rest of season (model)", "The trained model's per-game projection for the games left, with an "
+                   "80% range from its backtest errors for players at his games played and minutes: in past seasons, "
+                   "8 in 10 such players finished inside it. See the Model tab for how it was built and tested.")
+        html(f"""<div class="tiles">
+            <div><b>{games:.0f}</b><span>projected games left</span></div>
+            <div><b>{avail:.0%}</b><span>of his team's games (before injuries)</span></div>
+            <div><b>{int(r[MODEL_PREFIX + "k"]) if pd.notna(r.get(MODEL_PREFIX + "k")) else 0}</b><span>games behind the projection</span></div></div>"""
+             if pd.notna(games) and pd.notna(avail) else "")
+        st.dataframe(pd.DataFrame(rows), hide_index=True, row_height=30)
+

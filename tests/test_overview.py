@@ -183,3 +183,38 @@ def test_week_windows_use_matchup_periods_then_calendar_weeks():
 def test_playoff_windows():
     assert playoff_windows(CAL) == [(date(2027, 3, 8), date(2027, 3, 21))]
     assert playoff_windows(pd.DataFrame()) == []
+
+
+# ---------------------------------------------------------------- the trained model
+
+from ninecat.overview import interim_ros_line, model_loaded, ros_interval
+from tests.conftest import with_model
+
+
+def test_ros_line_is_the_model_where_it_has_a_line_else_interim(players):
+    plain = ros_line(players, snapshot(players))
+    assert plain.equals(interim_ros_line(players, snapshot(players))) and not model_loaded(players)
+    m = with_model(players)
+    m.loc[5, [c for c in m.columns if c.startswith("M_")]] = np.nan          # no model line for him
+    line = ros_line(m, snapshot(players))
+    assert model_loaded(m)
+    assert line.loc[0, "PTS"] == pytest.approx(players.loc[0, "PTS"] * 1.1) and line.loc[0, "GP"] == m.loc[0, "M_GP"]
+    assert line.loc[5, "PTS"] == pytest.approx(plain.loc[5, "PTS"])
+
+
+def test_ros_interval_follows_value_through_the_fitted_slope():
+    value = np.array([1.0, 2.0, 3.0, 4.0])
+    scale = np.array([1.0, 0.5, 1.0, 0.5])
+    ros = 3.0 * value * scale + 1
+    lo, hi = ros_interval(ros, value, scale, np.full(4, -1.0), np.full(4, 2.0))
+    assert lo == pytest.approx(ros - 3 * scale) and hi == pytest.approx(ros + 6 * scale)
+    nan_lo, _ = ros_interval(ros[:2], value[:2], scale[:2], np.zeros(2), np.zeros(2))
+    assert np.isnan(nan_lo).all()
+
+
+def test_overview_adds_a_ros_range_only_with_the_model(players, board):
+    assert run(players, board)["ros_lo"].isna().all()
+    m = with_model(players)
+    ov = overview(m, build_board(m, EIGHT), EIGHT, TEAMS, preseason=snapshot(players))
+    has = ov["ros"].notna() & ov["ros_lo"].notna()
+    assert has.sum() > 10 and ((ov.loc[has, "ros_lo"] <= ov.loc[has, "ros"]) & (ov.loc[has, "ros"] <= ov.loc[has, "ros_hi"])).all()

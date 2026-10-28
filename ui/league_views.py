@@ -11,7 +11,6 @@ import streamlit as st
 from ninecat import charts
 from ninecat.board import FANTASY_TIERS, player_key
 from ninecat.league import FREE_AGENT, League, average_rank, fit_note, team_category_totals, waivers
-from ninecat.matchup import WEEKS
 from ninecat.player import pct3
 from ninecat.theme import heat
 from ui.components import (
@@ -115,10 +114,10 @@ def render_team_categories(board: pd.DataFrame, lg: League, ctx: dict) -> None:
         st_rows = lg.standings()
         rows = "".join(
             f'<tr class="{"mine" if r.team == my_team else ""}"><td>{i}</td><td class="l">{escape(r.team)}</td>'
-            f'<td><b>{r.win:.0%}</b></td><td>{r.win * WEEKS:.1f}–{(1 - r.win) * WEEKS:.1f}</td><td>{r.cats:.2f}</td></tr>'
+            f'<td><b>{r.win:.0%}</b></td><td>{r.win * lg.season_weeks:.1f}–{(1 - r.win) * lg.season_weeks:.1f}</td><td>{r.cats:.2f}</td></tr>'
             for i, r in enumerate(st_rows.itertuples(), start=1))
         html('<div class="ltable"><table><thead><tr><th>#</th><th class="l">Team</th><th>Win chance</th>'
-             f'<th>Record over {WEEKS} weeks</th><th>Cats / week</th></tr></thead><tbody>{rows}</tbody></table></div>')
+             f'<th>Record over {lg.weeks_text} weeks</th><th>Cats / week</th></tr></thead><tbody>{rows}</tbody></table></div>')
 
 
 # ---------------------------------------------------------------- my team
@@ -143,16 +142,16 @@ def render_my_team(board: pd.DataFrame, lg: League, ctx: dict, open_player) -> N
               f'<div class="chips">{chips}</div></div>')
     tiles.html(f"""<div class="tiles">
         <div><b>#{standing}</b><span>projected standing of {len(lg.teams)}</span></div>
-        <div><b>{o.avg_win * WEEKS:.1f}–{(1 - o.avg_win) * WEEKS:.1f}</b><span>expected matchup record</span></div>
+        <div><b>{o.avg_win * lg.season_weeks:.1f}–{(1 - o.avg_win) * lg.season_weeks:.1f}</b><span>expected matchup record</span></div>
         <div><b>{o.avg_cats:.2f}</b><span>categories won per week (of {len(cats)})</span></div>
-        <div><b>{o.avg_cats * WEEKS:.0f}</b><span>category wins over {WEEKS} weeks</span></div></div>""")
+        <div><b>{o.avg_cats * lg.season_weeks:.0f}</b><span>category wins over {lg.weeks_text} weeks</span></div></div>""")
 
     left, right = st.columns(2)
     with left, card("outlook"):
         card_title("Category outlook", f"Share of weeks you're expected to win each category against the league, "
-                   f"your expected wins out of {WEEKS}, and your league rank. Strongest: {', '.join(ordered[:3])}. "
+                   f"your expected wins out of {lg.weeks_text}, and your league rank. Strongest: {', '.join(ordered[:3])}. "
                    f"Weakest: {', '.join(ordered[-2:])}.")
-        _chart(charts.category_strength(cats, o.by_cat, [ranks[c] for c in cats], WEEKS, ctx["punt"], t), "mt_strength")
+        _chart(charts.category_strength(cats, o.by_cat, [ranks[c] for c in cats], lg.season_weeks, ctx["punt"], t), "mt_strength")
     with right, card("matchups"):
         half = len(cats) / 2
         card_title("Matchups", f"Chance to win the weekly matchup (a majority of the {len(cats)} scored categories"
@@ -201,7 +200,7 @@ def render_my_team(board: pd.DataFrame, lg: League, ctx: dict, open_player) -> N
 
     with card("adds"):
         card_title("Best free-agent adds for you", f"Each free agent is tried against every possible drop from your "
-                   f"roster, simulated over {WEEKS} weeks; the best drop is shown. Category columns show the change "
+                   f"roster, simulated over {lg.weeks_text} weeks; the best drop is shown. Category columns show the change "
                    "in expected wins.")
         picks, _, _ = cached_waivers(lg, ctx["league_key"], me)
         _pickup_table(lg, picks[:10], ctx, key=f"mt_adds_{ctx['epoch']}", open_player=open_player, board=board)
@@ -226,7 +225,7 @@ def _pickup_cards(lg: League, picks, ctx: dict, board: pd.DataFrame, open_player
             name_button(lg.names[p.player], ids[p.player], f"pname_pick_{i}_{epoch}", open_player)
             cls = "pos" if p.change.cats > 0.005 else "neg" if p.change.cats < -0.005 else ""
             html(f'<div class="cardstat"><b class="{cls}">{p.change.cats:+.1f}</b>'
-                 f'<span>category wins over {WEEKS} weeks</span></div>'
+                 f'<span>category wins over {lg.weeks_text} weeks</span></div>'
                  f'<p class="note" style="margin:0">Weekly matchup win chance {p.change.win * 100:+.1f} pts</p>'
                  '<div class="card-h4">Best drop</div>')
             name_button(lg.names[p.drop], ids[p.drop], f"plink_drop_{i}_{epoch}", open_player)
@@ -270,7 +269,7 @@ def _pickup_table(lg: League, picks, ctx: dict, key: str, open_player, board: pd
     styler = frame.style.apply(lambda _: css, axis=None).format(fmt)
     config = {"Player": st.column_config.TextColumn(width="medium", pinned=True),
               "Best drop": st.column_config.TextColumn(width="medium"),
-              "Season +": st.column_config.NumberColumn(width=72, help=f"Extra category wins over {WEEKS} weeks"),
+              "Season +": st.column_config.NumberColumn(width=72, help=f"Extra category wins over {lg.weeks_text} weeks"),
               "Matchup win": st.column_config.NumberColumn(width=90, help="Change in weekly matchup win chance"),
               "Team fit": st.column_config.TextColumn(width="medium"),
               "Fit detail": st.column_config.TextColumn(width="large"),
@@ -307,7 +306,7 @@ def render_waivers(board: pd.DataFrame, lg: League, ctx: dict, open_player) -> N
     html(f'<div class="callout"><span class="eyebrow">Waiver wire for {escape(me)}</span>'
          f'<b>Best pickups for the rest of the season</b><span class="note">Every free agent is tried against every '
          f'possible drop from your roster, and the drop that leaves you winning the most categories is shown. '
-         f'{il_note}Values are extra category wins over {WEEKS} weeks.</span></div>')
+         f'{il_note}Values are extra category wins over {lg.weeks_text} weeks.</span></div>')
     healthy = st.toggle("Hide injured (OUT)", value=True, key="fa_healthy")
     shown = [p for p in picks if not (healthy and lg.injury[p.player] == "OUT")][:30]
     if shown:

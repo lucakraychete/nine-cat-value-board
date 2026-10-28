@@ -4,5 +4,6 @@ numpy>=1.26
 pandas>=2.2
 plotly>=6.0
 python-dotenv>=1.0
+scikit-learn>=1.5
 streamlit>=1.66
 pytest>=8.0

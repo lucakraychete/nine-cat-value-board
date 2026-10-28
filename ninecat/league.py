@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 from ninecat.config import NEGATIVE_CATS, PERCENT_CATS
-from ninecat.matchup import Change, Outlook, StatMatrix, Week, change, outlook
+from ninecat.matchup import GAMES_PER_WEEK, WEEKS, Change, Outlook, StatMatrix, Week, change, outlook
 
 FREE_AGENT = "FA"
 POSITIONS = ["PG", "SG", "SF", "PF", "C"]
@@ -85,6 +85,9 @@ class League:
     Player arrays are indexed by board position (0..n-1). `worth[i, j]` is
     the season category wins player i is worth to team j (for his own team:
     vs the best free agent at his position); `worth_by_cat` breaks it down.
+    `games` is each player's games in a typical week (one number for
+    everyone, or an array by board position) and `season_weeks` the weeks
+    every change is counted over; trades.py sets both to the season left.
     """
     cats: list[str]
     teams: list[str]
@@ -97,6 +100,8 @@ class League:
     weeks: dict[str, Week]
     base: dict[str, Outlook]
     cat_rank: pd.DataFrame
+    games: np.ndarray | float = GAMES_PER_WEEK
+    season_weeks: float = WEEKS
     worth: np.ndarray = field(default=None)
     worth_by_cat: np.ndarray = field(default=None)
     impact: np.ndarray = field(default=None)
@@ -134,19 +139,31 @@ class League:
     def outlook_with(self, team: str, roster: Sequence[int], weeks: dict[str, Week] | None = None,
                      games: np.ndarray | float | None = None) -> Outlook:
         weeks = dict(weeks or self.weeks)
-        weeks[team] = self.stats.week(roster) if games is None else self.stats.week(roster, games)
+        weeks[team] = self.stats.week(roster, self.games if games is None else games)
         return outlook(team, weeks, self.stats)
+
+    def week(self, roster: Sequence[int]) -> Week:
+        return self.stats.week(roster, self.games)
+
+    def change(self, before: Outlook, after: Outlook) -> Change:
+        return change(before, after, self.season_weeks)
+
+    @property
+    def weeks_text(self) -> str:
+        """The season length for display: "20", or "18.7" for the season left."""
+        w = self.season_weeks
+        return f"{w:.0f}" if abs(w - round(w)) < 0.05 else f"{w:.1f}"
 
     def swap_weeks(self, team: str, incoming: int, outgoing: int | None) -> dict[str, Week]:
         """Team-weeks after `team` gains `incoming` and loses `outgoing`; in a
         trade, incoming's team receives outgoing."""
         weeks = dict(self.weeks)
         mine = [x for x in self.rosters[team] if x != outgoing] + [incoming]
-        weeks[team] = self.stats.week(mine)
+        weeks[team] = self.week(mine)
         other = self.owner[incoming]
         if other in self.rosters and other != team:
             theirs = [x for x in self.rosters[other] if x != incoming] + ([outgoing] if outgoing is not None else [])
-            weeks[other] = self.stats.week(theirs)
+            weeks[other] = self.week(theirs)
         return weeks
 
     def ranks(self, weeks: dict[str, Week]) -> pd.DataFrame:
@@ -172,21 +189,22 @@ def category_ranks(weeks: dict[str, Week], cats: Sequence[str]) -> pd.DataFrame:
 
 
 def build_league(board: pd.DataFrame, cats: Sequence[str], teams: Sequence[str],
-                 season_games: int = 82, impact: bool = True) -> League:
+                 season_games: int = 82, impact: bool = True,
+                 games: np.ndarray | float = GAMES_PER_WEEK, season_weeks: float = WEEKS) -> League:
     """Rosters, team-weeks and base outlooks; with impact=True also every
     player's worth to every team, league impact and value over replacement."""
     stats = StatMatrix(board, cats, season_games)
     owner = board["fantasy_team"].to_numpy(object)
     order = np.argsort(-stats.value, kind="stable")
     rosters = {t: order[owner[order] == t] for t in teams}
-    weeks = {t: stats.week(rosters[t]) for t in teams}
+    weeks = {t: stats.week(rosters[t], games) for t in teams}
     league = League(
         cats=list(cats), teams=list(teams), stats=stats, owner=owner,
         names=board["name"].to_numpy(object),
         injury=board.get("injury_status", pd.Series("ACTIVE", index=board.index)).fillna("ACTIVE").to_numpy(object),
         positions=position_sets(board), rosters=rosters, weeks=weeks,
         base={t: outlook(t, weeks, stats) for t in teams},
-        cat_rank=category_ranks(weeks, cats),
+        cat_rank=category_ranks(weeks, cats), games=games, season_weeks=season_weeks,
     )
     if impact:
         _league_impact(league)
@@ -209,7 +227,7 @@ def _league_impact(lg: League) -> None:
             else:
                 d = lg.drop_for(roster, r)
                 new = [x for x in roster if x != d] + [r]
-            ch = change(lg.base[t], lg.outlook_with(t, new))
+            ch = lg.change(lg.base[t], lg.outlook_with(t, new))
             if t == own:
                 worth[r, j], worth_by_cat[r, j] = -ch.cats, -ch.by_cat
             else:
@@ -245,7 +263,7 @@ def drop_options(lg: League, team: str, add: int) -> list[DropOption]:
     leaves the team winning the most categories over the season)."""
     base = lg.base[team]
     roster = list(lg.rosters[team])
-    opts = [DropOption(d, change(base, lg.outlook_with(team, [x for x in roster if x != d] + [add])))
+    opts = [DropOption(d, lg.change(base, lg.outlook_with(team, [x for x in roster if x != d] + [add])))
             for d in roster if d != add]
     return sorted(opts, key=lambda o: -o.change.cats)
 
@@ -286,7 +304,7 @@ def waivers(lg: League, team: str) -> tuple[list[Pickup], list[DropCandidate], i
     for f in np.flatnonzero(lg.owner == FREE_AGENT):
         opts = []
         for d in roster:
-            ch = change(base, lg.outlook_with(team, [x for x in roster if x != d] + [f]))
+            ch = lg.change(base, lg.outlook_with(team, [x for x in roster if x != d] + [f]))
             opts.append((d, ch))
             if ch.cats > best_swap[d][1]:
                 best_swap[d] = [f, ch.cats, ch.by_cat]
@@ -295,7 +313,7 @@ def waivers(lg: League, team: str) -> tuple[list[Pickup], list[DropCandidate], i
         opts.sort(key=lambda o: -o[1].cats)
         il_cats = None
         if out_player is not None:
-            il_cats = change(base, lg.outlook_with(team, roster + [f])).cats
+            il_cats = lg.change(base, lg.outlook_with(team, roster + [f])).cats
         alt = opts[1] if len(opts) > 1 else None
         picks.append(Pickup(int(f), opts[0][0], opts[0][1], alt[0] if alt else None, alt[1].cats if alt else None,
                             out_player if il_cats is not None else None, il_cats))
@@ -360,9 +378,27 @@ class Uncertainty:
     why: str
 
 
-def uncertainty(impact: float, last_games: float | None, injury: str | None) -> Uncertainty:
-    """How much to trust his impact: rookies and players who missed last
-    season ride on projections alone."""
+MODEL_RANGE_LABELS = ((0.15, "narrow"), (0.35, "moderate"))   # half-width over |impact|, else "wide"
+
+
+def uncertainty(impact: float, last_games: float | None, injury: str | None,
+                value_range: tuple[float, float] | None = None, slope: float | None = None,
+                games: float | None = None) -> Uncertainty:
+    """How much to trust his impact.
+
+    With the trained model (value_range: its 80% range for his per-game value,
+    as offsets; slope: impact per unit of per-game value across the board), the
+    range is measured, not set by hand: impact + slope x each offset. Without
+    it, rookies and players who missed last season ride on projections alone,
+    so they get wider hand-set ranges.
+    """
+    if value_range is not None and slope is not None and all(np.isfinite(value_range)) and np.isfinite(slope):
+        low, high = sorted((impact + slope * value_range[0], impact + slope * value_range[1]))
+        half = (high - low) / 2 / max(abs(impact), 1.0)
+        label = next((name for cut, name in MODEL_RANGE_LABELS if half < cut), "wide")
+        at = f" at {int(games)} games played" if games is not None and np.isfinite(games) else ""
+        return Uncertainty(low, high, label, f"The model's 80% range: how far players like him{at} and at his "
+                                             "minutes landed from their projection in the backtests.")
     g = 0 if last_games is None or pd.isna(last_games) else int(last_games)
     if g == 0:
         share, label, why = 0.4, "wide", "No NBA stats last season: rookie, or missed the year. Projection only."
